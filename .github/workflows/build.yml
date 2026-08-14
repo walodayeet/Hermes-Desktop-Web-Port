@@ -30,7 +30,9 @@ jobs:
             if curl -sf -o /dev/null http://127.0.0.1:4000/; then break; fi
             sleep 1
           done
-          curl -sf http://127.0.0.1:4000/ | grep -q '<div id="root">' \
+          # NB: the built root div carries a class (`<div id="root" class="...">`)
+          # so match on the id attribute, not the bare tag.
+          curl -sf http://127.0.0.1:4000/ | grep -q 'id="root"' \
             && echo "proxy serves index.html OK" \
             || { echo "proxy failed to serve"; kill $SRV; exit 1; }
           kill $SRV
