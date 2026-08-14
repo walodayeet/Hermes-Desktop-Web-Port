@@ -18,15 +18,6 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { HashRouter } from 'react-router'
 
-// Web port: the bridge self-installs at module scope below — this import MUST
-// stay ahead of `./app` (module bodies evaluate in import order), so
-// window.hermesDesktop exists before the app's module-scope plugin discovery
-// (app/contrib/controller.tsx → watchRuntimePlugins) runs.
-import './web-bridge'
-
-// Web port: session-cookie auth gate. Boots the app only when authenticated.
-import { runLoginGate } from './login-gate'
-
 import App from './app'
 import { RootErrorBoundary } from './components/error-boundary'
 import { HapticsProvider } from './components/haptics-provider'
@@ -59,8 +50,7 @@ if (winParam === 'overlay') {
 } else if (winParam === 'wake') {
   void import('./app/wake-indicator/wake-indicator-root').then(({ mountWakeIndicator }) => mountWakeIndicator())
 } else {
-  void runLoginGate().then(() => {
-    createRoot(document.getElementById('root')!).render(
+  createRoot(document.getElementById('root')!).render(
     <StrictMode>
       <RootErrorBoundary>
         <QueryClientProvider client={queryClient}>
@@ -92,6 +82,5 @@ if (winParam === 'overlay') {
         </QueryClientProvider>
       </RootErrorBoundary>
     </StrictMode>
-    )
-  })
+  )
 }
