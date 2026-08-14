@@ -1,0 +1,10 @@
+{
+  "name": "proxy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Same-origin facade over hermes serve (HTTP + WS + static)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

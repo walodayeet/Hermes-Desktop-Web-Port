@@ -1,0 +1,15 @@
+{
+  "name": "hermes-desktop-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Web port of the Hermes Electron desktop app",
+  "workspaces": [
+    "proxy",
+    "web"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace web",
+    "build": "npm run build --workspace web",
+    "start": "npm run start --workspace proxy"
+  }
+}
