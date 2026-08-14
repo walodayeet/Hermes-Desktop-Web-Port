@@ -1,20 +1,64 @@
 {
   "compilerOptions": {
-    "target": "ES2020",
+    "target": "ES2023",
     "useDefineForClassFields": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
-    "module": "ESNext",
+    "lib": [
+      "DOM",
+      "DOM.Iterable",
+      "ES2023"
+    ],
+    "types": [
+      "node"
+    ],
+    "allowJs": false,
     "skipLibCheck": true,
-    "moduleResolution": "bundler",
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "moduleDetection": "force",
-    "noEmit": true,
     "jsx": "react-jsx",
-    "strict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true
+    "paths": {
+      "@/*": [
+        "./src/*"
+      ],
+      "@hermes/plugin-sdk": [
+        "./src/sdk/index.ts"
+      ],
+      "@hermes/shared/billing": [
+        "../shared/src/billing-types.ts"
+      ],
+      "@hermes/shared": [
+        "../shared/src/index.ts"
+      ],
+      "@hermes/shared/billing-policy": [
+        "../shared/src/billing-policy.ts"
+      ],
+      "@hermes/shared/charge-settlement": [
+        "../shared/src/charge-settlement.ts"
+      ],
+      "@hermes/shared/skin": [
+        "../shared/src/skin.ts"
+      ]
+    }
   },
-  "include": ["src"]
+  "include": [
+    "src",
+    "../shared/src"
+  ],
+  "exclude": [
+    "e2e",
+    "electron",
+    "playwright.config.ts",
+    "**/*.test.ts",
+    "**/*.test.tsx"
+  ],
+  "references": [
+    {
+      "path": "./tsconfig.electron.json"
+    }
+  ]
 }

@@ -1,62 +1,82 @@
 # Hermes Desktop Web
 
-Web port of the Hermes Electron desktop app — mobile-first chat client for
-`hermes serve`.
+A **web port of the Hermes Electron desktop app** (`hermes-agent/apps/desktop`),
+not a reimplementation. The renderer — the real desktop UI (chat, sessions,
+profiles, command center, settings, plugins) — is copied verbatim and runs in
+the browser; only the Electron shell is replaced by a web bridge.
 
-## Architecture
+## How the port works
 
 ```
-web/     — Vite + React + TypeScript SPA (mobile-first, PWA)
-proxy/   — tiny Node HTTP/WS facade over hermes serve
+browser ──▶ proxy/server.js ──▶ hermes serve (127.0.0.1:9119)
+              │  /api/* + /auth/* + WS /api/ws  (same-origin passthrough)
+              │  static web/dist/
 ```
 
-The proxy serves the SPA and forwards `/api/*` + `/api/ws` to the backend from
-one origin, so the browser never hits CORS or `ws://` mixed-content.
+The Electron app has one native seam: `window.hermesDesktop`, provided by the
+main process's preload script. The renderer never touches Node/Electron
+directly — everything goes through that bridge. The web port keeps the
+renderer byte-for-byte and supplies the bridge from the browser:
+
+- `web/src/web-bridge.ts` — same-origin REST (`hermesDesktop.api`), WS ticket
+  minting (`getGatewayWsUrl` → `POST /api/auth/ws-ticket`), clipboard, and
+  safe no-ops for genuinely native features (pet overlay, HUD windows,
+  updater, OS file dialogs…). The renderer guards optional members and
+  degrades gracefully.
+- `web/src/login-gate.ts` — pre-boot auth gate. The Electron shell
+  authenticates out-of-band (env credentials, native OAuth); a browser can't,
+  so the gate checks the session cookie (`GET /api/auth/me`) and renders a
+  minimal sign-in form (`POST /auth/password-login`) before the app boots.
+
+The renderer source is copied from `apps/desktop/src` + `apps/shared/src`.
+When the upstream desktop app changes, re-copy those trees; the bridge and
+gate live in `web/src/web-bridge.ts` + `web/src/login-gate.ts` and are the
+only web-specific files.
 
 ## Prerequisites
 
-- Node 20+ (proxy uses `node:http` + `ws`)
-- `hermes serve` running on `127.0.0.1:9119` (override with `HERMES_TARGET`)
-
-## Install
-
-```sh
-npm install
-```
+- Node 20+
+- `hermes serve` running on `127.0.0.1:9119` (override: `HERMES_TARGET`)
 
 ## Run
 
 ```sh
-# build the SPA (web/)
-npm run build
-
-# start the proxy on :4000
-npm start
+npm install
+npm run build        # build the renderer (web/)
+npm start            # proxy on :4000 → serves app + forwards API/WS
+# open http://127.0.0.1:4000, sign in with your gateway credentials
 ```
 
-Then open <http://127.0.0.1:4000>.
-
-### Proxy env
-
-| Var            | Default          | Purpose                             |
-|----------------|------------------|-------------------------------------|
-| `PORT`         | `4000`           | Proxy listen port                   |
-| `HERMES_TARGET`| `127.0.0.1:9119` | Backend `host:port` (or `http://…`) |
-
-## Development
+### Dev
 
 ```sh
-# web dev server (Vite, hot reload; see web/ for VITE_API_BASE)
-npm run dev
+npm run dev          # Vite dev server (hot reload) on :5175
+# dev proxies /api + /auth to 127.0.0.1:9119 via web/vite.config.ts
 ```
 
-## Endpoints
+### Env
 
-- `GET /api/status` → backend status
-- `POST /auth/password-login` → backend login (v0.20.0 cookie flow)
-- `WS /api/ws?ticket=…` → backend JSON-RPC gateway (pure passthrough; the SPA
-  mints single-use 30s tickets via `POST /api/auth/ws-ticket`)
-- everything else → static `web/dist/` (SPA fallback to `index.html`)
+| Var | Default | Purpose |
+|---|---|---|
+| `PORT` | `4000` | Proxy listen port |
+| `HERMES_TARGET` | `127.0.0.1:9119` | Backend `host:port` |
+| `VITE_HERMES_BASE` | *(same-origin)* | Point the renderer at a backend directly |
 
-No credentials are stored in this repo. The proxy forwards auth headers,
-cookies, and query params verbatim; it never parses or logs them.
+## Layout
+
+```
+web/       — the desktop app's renderer (copied) + web-bridge.ts + login-gate.ts
+shared/    — @hermes/shared package (gateway client, ws-url, billing types)
+proxy/     — zero-dep Node same-origin facade (HTTP + WS passthrough, static)
+```
+
+## Upstream sync
+
+The renderer tracks `hermes-agent/apps/desktop`. Re-sync:
+
+```sh
+rsync -a --delete /path/to/hermes-agent/apps/desktop/src/ web/src/
+rsync -a --delete /path/to/hermes-agent/apps/shared/src/ shared/src/
+# keep: web/src/web-bridge.ts, web/src/login-gate.ts (web-specific)
+# drop: *.test.* (vitest not installed here)
+```
