@@ -17,19 +17,17 @@ entirely. In dev, Vite proxies to it or to 9119 directly.
 
 ## Backend (hermes serve)
 
-- Live on this host: `127.0.0.1:9119` (also `100.74.228.7:9119` over Tailscale)
+- Default: `127.0.0.1:9119` (override `HERMES_TARGET`; docker default resolves the host gateway)
 - `GET /api/status` → auth_required, auth_providers, gateway state
 - **v0.20.0 auth = cookie flow** (NOT the older `?token=` flow):
   - `POST /auth/password-login` `{provider:"basic", username, password}` → HttpOnly session cookie
   - `GET /api/auth/providers`, `GET /api/auth/me`, `POST /auth/logout`
   - `POST /api/auth/ws-ticket` → single-use `{ticket, ttl_seconds}` (30s TTL) for WS auth
 - `WS /api/ws?ticket=...` → newline-delimited JSON-RPC 2.0
-- Full method/event catalog: see `hermes-gateway-protocol` skill reference:
-  `/home/walos/.hermes/skills/devops/hermes-gateway-protocol/references/gateway-protocol-reference.md`
-  (NOTE: skill reference predates v0.20.0 — actual field names were verified
-  against `hermes_cli/dashboard_auth/` + `tui_gateway/server.py` source:
+- Full method/event catalog: see the Hermes `tui_gateway` protocol reference in
+  the hermes-agent docs/source (`hermes_cli/dashboard_auth/` + `tui_gateway/server.py`):
   `prompt.submit {text, session_id}`, `approval.respond {session_id, choice}`,
-  `clarify.respond {request_id, answer}`, `session.most_recent`.)
+  `clarify.respond {request_id, answer}`, `session.most_recent`.
 
 ### Key methods
 `prompt.submit {message, session_id?}` (streams events), `session.create`,
@@ -45,48 +43,28 @@ text), `message.complete`, `thinking.delta`, `reasoning.delta`,
 `clarify.request {id, question, options?}`, `approval.request {id, command,
 message?}`, `error`.
 
-## Work split (two agents, parallel)
+## Current implementation notes
 
-### Agent 1 — `web/` (the whole frontend)
-Vite + React + TypeScript, mobile-first. Deps kept minimal (ponytail):
-React, zustand (state), Tailwind v4 optional — a hand-rolled CSS design
-system is acceptable if cleaner. PWA via `vite-plugin-pwa` (manifest +
-service worker, offline shell).
-
-Required UX (mobile-first is the whole point):
-- Login screen (username/password → token in localStorage)
-- Chat view: streaming deltas rendered progressively, thinking blocks
-  collapsible, tool events as compact cards (name + status, expandable
-  detail), error toasts
-- Bottom-fixed composer: auto-grow textarea, Enter=send, Shift+Enter=newline,
-  safe-area insets, disabled while streaming (with Stop button)
-- Session drawer: hamburger, session list (title, preview, time), create new,
-  delete (confirm), switch; works as bottom sheet on narrow screens
-- Clarify requests → bottom sheet with option buttons
-- Approval requests → inline approve/deny card (mobile-sized buttons)
-- Dark/light/system theme, responsive 320px→desktop
-- Connection status pill (connected/connecting/reconnecting/offline)
-
-Dev endpoint default: `VITE_API_BASE=http://127.0.0.1:9119` (dev proxy).
-No credentials hardcoded — user logs in.
-
-### Agent 2 — `proxy/` + repo plumbing
-- Node proxy (Express or plain node:http + ws). Endpoints:
-  - `GET /api/status` → forward
-  - `POST /api/auth/login` → forward
-  - `WS /api/ws` → upgrade + forward to `127.0.0.1:9119` (target configurable
-    via env `HERMES_TARGET`), same-origin so no CORS needed
-  - serve `web/dist/` statically
-- Port via env `PORT` (default 4000). `npm start`. Minimal deps (express +
-  ws, or zero-dep node:http).
-- Root: `README.md` (run instructions), `.gitignore` (node_modules, dist,
-  .env), `package.json` workspaces if needed — keep it simple.
+- The renderer is **copied verbatim** from `NousResearch/hermes-agent/apps/desktop/src`
+  + `apps/shared/src` (see `scripts/sync-renderer.sh`). Only the Electron shell
+  is replaced:
+  - `web/src/web-bridge.ts` — browser implementation of `window.hermesDesktop`
+  - `web/src/login-gate.ts` — pre-boot password gate
+  - `scripts/reapply-port-patches.mjs` — idempotent post-sync patches
+- The proxy is a **zero-dep** `node:http` server (no Express/ws packages):
+  HTTP passthrough for `/api/*` + `/auth/*`, raw TCP upgrade passthrough for
+  `WS /api/ws`, static `web/dist/` with SPA fallback.
+- Env: `PORT`, `HERMES_TARGET`, `WEB_FS_ROOT`, `HERMES_TERM_CWD`,
+  `HERMES_PLUGINS_DIR` (see README table). No credentials hardcoded — the
+  user signs in through the login gate.
+- Dev endpoint default: `VITE_API_BASE=http://127.0.0.1:9119` (dev proxy);
+  `VITE_HERMES_BASE` points the renderer at a backend directly.
 
 ## Conventions
 
-- DO NOT `git commit` — leave the working tree; orchestrator commits.
-- Verify your half runs: web agent runs `npm run build` + dev server;
-  proxy agent curls `/api/status` through the proxy and tests WS upgrade.
-- Credentials for testing the live backend live in `~/.hermes/.env`
-  (`HERMES_DASHBOARD_BASIC_AUTH_*`) — read them there, never print values
-  to output, never commit.
+- Keep `web/src/web-bridge.ts` + `web/src/login-gate.ts` web-specific;
+  everything else in `web/src` tracks upstream.
+- Run the real checks before claiming done: `npm run build`, and boot the
+  proxy to verify it serves `web/dist/` + forwards `/api/status` and a WS
+  upgrade.
+- Never commit credentials; test against a local backend only.

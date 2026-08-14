@@ -1,0 +1,16 @@
+# Build context exclusions — keeps the image lean and (important) prevents
+# local secrets/home state from leaking into the image.
+node_modules/
+**/node_modules/
+web/dist/
+dist/
+.git/
+.gitignore
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+README.md
+ARCHITECTURE.md
+scripts/

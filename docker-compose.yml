@@ -1,0 +1,40 @@
+services:
+  hermes-desktop-web:
+    build: .
+    image: hermes-desktop-web:latest
+    container_name: hermes-desktop-web
+    restart: unless-stopped
+    ports:
+      - "${PORT:-4000}:4000"
+    environment:
+      # Hermes agent backend. In the common self-host setup the agent runs on
+      # the same host (hermes dashboard / hermes serve). host.docker.internal
+      # resolves to the host via extra_hosts below (Linux + Docker Desktop).
+      - HERMES_TARGET=${HERMES_TARGET:-host.docker.internal:9119}
+      - PORT=4000
+      # Filesystem door root (the Files rail / file picker). Expose a volume
+      # with the directories you actually want the web UI to browse. NEVER
+      # mount / or your whole home here if the UI is reachable beyond a
+      # trusted network.
+      - WEB_FS_ROOT=${WEB_FS_ROOT:-/workspace}
+      - HERMES_TERM_CWD=${HERMES_TERM_CWD:-/workspace}
+      # Desktop-plugins door. Mount a directory of plugins (each
+      # <name>/plugin.js) if you use the plugin runtime; empty otherwise.
+      - HERMES_PLUGINS_DIR=${HERMES_PLUGINS_DIR:-/plugins}
+    extra_hosts:
+      # Linux: maps host.docker.internal → host's gateway IP. Docker Desktop
+      # provides it natively; the entry is a no-op there.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - workspace:/workspace
+      # Optional: expose a plugins dir. Create ./plugins/<name>/plugin.js to use.
+      # - ./plugins:/plugins:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||4000)+'/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+volumes:
+  workspace:

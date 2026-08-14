@@ -5,10 +5,13 @@ not a reimplementation. The renderer — the real desktop UI (chat, sessions,
 profiles, command center, settings, plugins) — is copied verbatim and runs in
 the browser; only the Electron shell is replaced by a web bridge.
 
+> **Self-host your Hermes agent and talk to it from any browser or phone.**
+> The agent stays on your server; this is the UI layer in front of it.
+
 ## How the port works
 
 ```
-browser ──▶ proxy/server.js ──▶ hermes serve (127.0.0.1:9119)
+browser ──▶ proxy/server.js ──▶ hermes dashboard / hermes serve (HERMES_TARGET)
               │  /api/* + /auth/* + WS /api/ws  (same-origin passthrough)
               │  static web/dist/
 ```
@@ -19,14 +22,66 @@ directly — everything goes through that bridge. The web port keeps the
 renderer byte-for-byte and supplies the bridge from the browser:
 
 - `web/src/web-bridge.ts` — same-origin REST (`hermesDesktop.api`), WS ticket
-  minting (`getGatewayWsUrl` → `POST /api/auth/ws-ticket`), clipboard, and
-  safe no-ops for genuinely native features (pet overlay, HUD windows,
-  updater, OS file dialogs…). The renderer guards optional members and
-  degrades gracefully.
+  minting (`getGatewayWsUrl` → `POST /api/auth/ws-ticket`), file picking via
+  the browser File System Access API (Chromium) or a hidden `<input type=file>`
+  (iOS Safari), clipboard, and safe no-ops for genuinely native features (pet
+  overlay, HUD windows, updater, OS file dialogs…). The renderer guards
+  optional members and degrades gracefully.
 - `web/src/login-gate.ts` — pre-boot auth gate. The Electron shell
   authenticates out-of-band (env credentials, native OAuth); a browser can't,
   so the gate checks the session cookie (`GET /api/auth/me`) and renders a
   minimal sign-in form (`POST /auth/password-login`) before the app boots.
+
+## Prerequisites
+
+- A running **Hermes agent** with the web backend: `hermes dashboard --host 127.0.0.1 --port 9119 --no-open`
+  (or `hermes serve`). The web UI is a facade in front of that endpoint.
+- Node 20+ **or** Docker.
+
+## Run with Docker (recommended)
+
+```sh
+cp .env.example .env        # set HERMES_TARGET to your agent backend
+docker compose up -d --build
+# open http://127.0.0.1:4000, sign in with your gateway credentials
+```
+
+The container runs only the web UI; the agent itself keeps running on your
+host/server. Point `HERMES_TARGET` at it:
+
+| Setup | `HERMES_TARGET` |
+|---|---|
+| Agent on same host (bare metal) | `127.0.0.1:9119` |
+| Docker Desktop on same machine | `host.docker.internal:9119` |
+| Agent on another machine (LAN / Tailscale) | `<agent-ip>:9119` |
+| Agent containerized in compose | `hermes-agent:9119` |
+
+## Run without Docker
+
+```sh
+npm install
+npm run build        # build the renderer (web/)
+npm start            # proxy on :4000 → serves app + forwards API/WS
+# open http://127.0.0.1:4000, sign in with your gateway credentials
+```
+
+### Dev
+
+```sh
+npm run dev          # Vite dev server (hot reload) on :5175
+# dev proxies /api + /auth to HERMES_TARGET via web/vite.config.ts
+```
+
+### Env
+
+| Var | Default | Purpose |
+|---|---|---|
+| `PORT` | `4000` | Proxy listen port |
+| `HERMES_TARGET` | `127.0.0.1:9119` | Backend `host:port` or `http(s)://host:port` |
+| `WEB_FS_ROOT` | *(docker: `/workspace`; bare: `$HOME`)* | Root of the Files rail / file browser door |
+| `HERMES_TERM_CWD` | *(docker: `/workspace`)* | Default cwd for the in-browser terminal |
+| `HERMES_PLUGINS_DIR` | *(docker: `/plugins`; bare: `~/.hermes/desktop-plugins`)* | Desktop-plugins door |
+| `VITE_HERMES_BASE` | *(same-origin)* | Point the renderer at a backend directly (dev) |
 
 ## Desktop plugins in the web port
 
@@ -40,44 +95,27 @@ the **proxy serves that folder** as a virtual `/plugins` root:
 The runtime plugin loader (unchanged, browser-native: blob import + SDK
 specifier rewrite) talks to it through the web bridge
 (`desktopPluginsRoot`/`readDir`/`readFileText`), and its 5-second poll
-replaces fs-watching: drop a folder into `~/.hermes/desktop-plugins/` on the
-proxy host → plugin appears in ~5s; remove it → unloads. Plugins with a
-backend (e.g. file-ops) reach it via the normal `/api/plugins/*` forward.
+replaces fs-watching: drop a folder into the plugins dir on the proxy host →
+plugin appears in ~5s; remove it → unloads. Plugins with a backend (e.g.
+file-ops) reach it via the normal `/api/plugins/*` forward.
 Override the folder with `HERMES_PLUGINS_DIR`.
 
-The renderer source is copied from `apps/desktop/src` + `apps/shared/src`.
-When the upstream desktop app changes, re-copy those trees; the bridge and
-gate live in `web/src/web-bridge.ts` + `web/src/login-gate.ts` and are the
-only web-specific files.
+## ⚠️ Security
 
-## Prerequisites
+The web UI is **a full interface to your agent**: chat, filesystem access
+(`WEB_FS_ROOT`), an interactive terminal (`/web-term`), and plugin loading.
+Anyone who logs in gets agent-level control of the host.
 
-- Node 20+
-- `hermes serve` running on `127.0.0.1:9119` (override: `HERMES_TARGET`)
-
-## Run
-
-```sh
-npm install
-npm run build        # build the renderer (web/)
-npm start            # proxy on :4000 → serves app + forwards API/WS
-# open http://127.0.0.1:4000, sign in with your gateway credentials
-```
-
-### Dev
-
-```sh
-npm run dev          # Vite dev server (hot reload) on :5175
-# dev proxies /api + /auth to 127.0.0.1:9119 via web/vite.config.ts
-```
-
-### Env
-
-| Var | Default | Purpose |
-|---|---|---|
-| `PORT` | `4000` | Proxy listen port |
-| `HERMES_TARGET` | `127.0.0.1:9119` | Backend `host:port` |
-| `VITE_HERMES_BASE` | *(same-origin)* | Point the renderer at a backend directly |
+- The password auth used by the login gate is fine on a **trusted LAN or
+  behind a VPN/tunnel** — not for direct public-internet exposure.
+- Prefer SSH tunnel: `ssh -N -L 4000:127.0.0.1:4000 user@server`, then browse
+  to `http://127.0.0.1:4000`.
+- Or expose via Tailscale (bind the agent's dashboard to your tailnet IP and
+  point `HERMES_TARGET` at it).
+- If you must put it on the public internet, front it with TLS + a reverse
+  proxy and use your Hermes backend's OAuth provider rather than the password
+  form. Never leave `WEB_FS_ROOT` at `/` and never bind the filesystem/terminal
+  doors to an unauthenticated public endpoint.
 
 ## Layout
 
@@ -85,15 +123,27 @@ npm run dev          # Vite dev server (hot reload) on :5175
 web/       — the desktop app's renderer (copied) + web-bridge.ts + login-gate.ts
 shared/    — @hermes/shared package (gateway client, ws-url, billing types)
 proxy/     — zero-dep Node same-origin facade (HTTP + WS passthrough, static)
+scripts/   — reapply-port-patches.mjs (idempotent post-sync patcher)
 ```
 
 ## Upstream sync
 
-The renderer tracks `hermes-agent/apps/desktop`. Re-sync:
+The renderer tracks `hermes-agent/apps/desktop`. Re-sync from the upstream
+GitHub repo:
 
 ```sh
-rsync -a --delete /path/to/hermes-agent/apps/desktop/src/ web/src/
-rsync -a --delete /path/to/hermes-agent/apps/shared/src/ shared/src/
-# keep: web/src/web-bridge.ts, web/src/login-gate.ts (web-specific)
-# drop: *.test.* (vitest not installed here)
+npm run sync:renderer -- /path/to/hermes-agent-checkout
+# or: npm run sync:renderer   (uses HERMES_UPSTREAM_DIR, defaults to a clone
+#                             in node_modules/.cache if you set HERMES_UPSTREAM_REPO)
 ```
+
+The sync rsyncs `apps/desktop/src` + `apps/shared/src`, keeps the web-specific
+`web-bridge.ts` / `login-gate.ts`, drops `*.test.*`, and re-applies the port
+patches from `scripts/reapply-port-patches.mjs` (idempotent — safe to run any
+number of times).
+
+## License
+
+MIT. The renderer is derived from
+[NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)
+(MIT, © Nous Research); see [LICENSE](LICENSE).

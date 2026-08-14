@@ -35,8 +35,9 @@ const PLUGINS_DIR = process.env.HERMES_PLUGINS_DIR || path.join(os.homedir(), '.
 // stay inside the (real) root.
 const WEB_FS_ROOT = process.env.WEB_FS_ROOT || os.homedir();
 
-// Interactive terminal default cwd (the port's own checkout).
-const TERM_DEFAULT_CWD = process.env.HERMES_TERM_CWD || path.join(os.homedir(), 'G', 'work', 'Hermes-Desktop-Web');
+// Interactive terminal default cwd. In docker this is the mounted workspace
+// (WEB_FS_ROOT); on a bare host, the agent's home.
+const TERM_DEFAULT_CWD = process.env.HERMES_TERM_CWD || os.homedir();
 
 // ---------------------------------------------------------------------------
 // Target parsing

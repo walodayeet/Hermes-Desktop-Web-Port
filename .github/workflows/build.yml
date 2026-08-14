@@ -1,0 +1,36 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build renderer
+        run: npm run build
+
+      - name: Smoke-test proxy boots + serves dist
+        run: |
+          node proxy/server.js &
+          SRV=$!
+          for i in $(seq 1 30); do
+            if curl -sf -o /dev/null http://127.0.0.1:4000/; then break; fi
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:4000/ | grep -q '<div id="root">' \
+            && echo "proxy serves index.html OK" \
+            || { echo "proxy failed to serve"; kill $SRV; exit 1; }
+          kill $SRV
