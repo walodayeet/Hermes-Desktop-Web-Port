@@ -43,7 +43,8 @@
       "@hermes/shared/skin": [
         "../shared/src/skin.ts"
       ]
-    }
+    },
+    "noEmit": true
   },
   "include": [
     "src",
