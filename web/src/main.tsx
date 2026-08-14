@@ -18,11 +18,11 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { HashRouter } from 'react-router'
 
-// Web port: install the window.hermesDesktop bridge BEFORE the app boots —
-// use-gateway-boot fails hard ("Desktop IPC bridge is unavailable") if the
-// bridge is missing. The Electron preload provides this in the native app.
-import { installWebBridge } from './web-bridge'
-installWebBridge()
+// Web port: the bridge self-installs at module scope below — this import MUST
+// stay ahead of `./app` (module bodies evaluate in import order), so
+// window.hermesDesktop exists before the app's module-scope plugin discovery
+// (app/contrib/controller.tsx → watchRuntimePlugins) runs.
+import './web-bridge'
 
 // Web port: session-cookie auth gate. Boots the app only when authenticated.
 import { runLoginGate } from './login-gate'

@@ -410,3 +410,13 @@ export function installWebBridge(): void {
   }
   window.hermesDesktop = bridge
 }
+
+// Self-install at module scope. Import hoisting means a bare `installWebBridge()`
+// call in main.tsx runs AFTER the app's module graph evaluates — and
+// `app/contrib/controller.tsx` discovers runtime plugins at MODULE scope
+// (watchRuntimePlugins → scanDiskPlugins), so the bridge must already exist
+// when that runs. web-bridge.ts is imported before `./app` in main.tsx, so
+// module-scope evaluation order guarantees the install happens first.
+if (!window.hermesDesktop) {
+  installWebBridge()
+}
