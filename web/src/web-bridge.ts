@@ -58,7 +58,87 @@ function wsBase(): string {
 const webInputFiles = new Map<string, File>()
 let webInputSeq = 0
 
+// --- zoom / UI scale ----------------------------------------------------------
+// Electron owns zoom via webContents.setZoomLevel; the browser equivalent is
+// CSS `zoom` on the document root. Persist the percent so reloads keep it.
+const ZOOM_STORAGE_KEY = 'hermes-web.zoomPercent'
+const zoomListeners = new Set<(payload: { level: number; percent: number }) => void>()
+
+// File System Access API (Chromium desktop) — declared locally because the
+// project's TS lib target predates it.
+interface WebFilePickerHandle {
+  getFile: () => Promise<File>
+}
+interface WebFilePickerOptions {
+  multiple?: boolean
+  types?: Array<{ description: string; accept: Record<string, string[]> }>
+}
+declare global {
+  interface Window {
+    showOpenFilePicker?: (options?: WebFilePickerOptions) => Promise<WebFilePickerHandle[]>
+  }
+}
+
+function readZoomPercent(): number {
+  try {
+    const raw = localStorage.getItem(ZOOM_STORAGE_KEY)
+    const parsed = raw ? Number(raw) : NaN
+    return Number.isFinite(parsed) && parsed >= 50 && parsed <= 200 ? parsed : 100
+  } catch {
+    return 100
+  }
+}
+
+function applyZoomPercent(percent: number): void {
+  const clamped = Math.min(200, Math.max(50, Math.round(percent)))
+  try {
+    localStorage.setItem(ZOOM_STORAGE_KEY, String(clamped))
+  } catch {
+    // private mode — zoom still applies for this session
+  }
+  document.documentElement.style.zoom = String(clamped / 100)
+  for (const cb of zoomListeners) cb({ level: 0, percent: clamped })
+}
+
+// Apply persisted zoom on boot (module scope, right after the bridge installs).
+if (typeof document !== 'undefined') {
+  applyZoomPercent(readZoomPercent())
+}
+
 function pickWebFiles(multiple: boolean, accept?: string): Promise<string[]> {
+  // Prefer the File System Access API when available (Chromium desktop):
+  // it returns File objects directly, has no gesture-context race, and its
+  // AbortError maps cleanly to "cancelled". Falls back to the hidden-input
+  // flow (required on iOS Safari, which doesn't ship showOpenFilePicker).
+  if (typeof window.showOpenFilePicker === 'function') {
+    const pick = window.showOpenFilePicker as (options?: WebFilePickerOptions) => Promise<WebFilePickerHandle[]>
+    return (async () => {
+      try {
+        const acceptTypes = accept ? { '*/*': [`.${accept.split(',').map(s => s.trim()).join(',.')}`] } : undefined
+        const handles = await pick({
+          multiple,
+          ...(acceptTypes ? { types: [{ description: 'Files', accept: { 'application/octet-stream': Object.values(acceptTypes['*/*']) } }] } : {}),
+        })
+        const files = await Promise.all(handles.map(h => h.getFile()))
+        if (!files.length) return []
+        return files.map(file => {
+          webInputSeq += 1
+          const key = `web-input:${webInputSeq}`
+          webInputFiles.set(key, file)
+          return key
+        })
+      } catch (err) {
+        // AbortError = user closed the picker. Any other error falls through
+        // to the input path as a last resort (older Chromium).
+        if ((err as Error).name === 'AbortError') return []
+        return pickWebFilesViaInput(multiple, accept)
+      }
+    })()
+  }
+  return pickWebFilesViaInput(multiple, accept)
+}
+
+function pickWebFilesViaInput(multiple: boolean, accept?: string): Promise<string[]> {
   return new Promise((resolve) => {
     const input = document.createElement('input')
     input.type = 'file'
@@ -82,13 +162,29 @@ function pickWebFiles(multiple: boolean, accept?: string): Promise<string[]> {
     // and the picker's closing also fires `focus` when the page re-gains it.
     // Resolving on that focus with an empty file list drops the selection.
     // So: stash the files on `change` first, and only resolve the picker as
-    // CANCELLED on focus when NO change ever fired.
+    // CANCELLED on focus when NO change ever fired. The cancel check must be
+    // DELAYED well past the event: iOS populates input.files and dispatches
+    // `change` only AFTER the focus event lands, so a 0ms timer sees an empty
+    // list and wrongly cancels a real pick.
     const onWindowFocus = () => {
-      // Give `change` a beat to land (iOS dispatches it after focus).
-      setTimeout(() => {
-        if (!settled && input.files?.length) return
-        if (!settled) settle([])
-      }, 0)
+      window.setTimeout(() => {
+        if (settled) return
+        const files = [...(input.files ?? [])]
+        if (files.length) {
+          // `change` may still be queued; settle from what's already there.
+          settle(
+            files.map(file => {
+              webInputSeq += 1
+              const key = `web-input:${webInputSeq}`
+              webInputFiles.set(key, file)
+              return key
+            })
+          )
+          return
+        }
+        // No files at all — the user cancelled (Escape / backdrop).
+        settle([])
+      }, 400)
     }
 
     input.onchange = () => {
@@ -515,6 +611,18 @@ export function installWebBridge(): void {
     profile: {
       get: async () => ({ profile: null }),
       set: async () => ({ profile: null }),
+    },
+
+    // --- zoom / UI scale: CSS zoom on the root, persisted to localStorage ------
+    zoom: {
+      get: async () => ({ level: 0, percent: readZoomPercent() }),
+      setPercent: (percent: number) => {
+        applyZoomPercent(percent)
+      },
+      onChanged: (callback: (payload: { level: number; percent: number }) => void) => {
+        zoomListeners.add(callback)
+        return () => zoomListeners.delete(callback)
+      },
     },
 
     // --- notifications / media ----------------------------------------------------

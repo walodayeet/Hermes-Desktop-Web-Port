@@ -3,6 +3,7 @@ import { type ComponentProps, type MouseEvent, type ReactNode, useEffect, useSta
 import { useLocation, useNavigate } from 'react-router'
 
 import { hudTargetSessionId } from '@/app/hud/handoff'
+import { openCommandPalette } from '@/store/command-palette'
 import { toggleLayoutEditMode } from '@/components/pane-shell/edit-mode'
 import { resetLayoutTree } from '@/components/pane-shell/tree/store'
 import { Button } from '@/components/ui/button'
@@ -131,6 +132,19 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
   const rightEdge = { open: fileBrowserOpen, toggle: toggleFileBrowserOpen }
 
   const leftToolbarTools: TitlebarTool[] = [
+    {
+      // Web port (mobile): the command palette is ⌘K-only on desktop; touch
+      // devices have no keybind, so expose a visible trigger on small screens.
+      actionId: 'nav.commandPalette',
+      className: 'md:hidden',
+      icon: <TitlebarIcon name="search" />,
+      id: 'command-palette',
+      label: t.commandCenter.paletteTitle,
+      onSelect: () => {
+        triggerHaptic('open')
+        openCommandPalette()
+      }
+    },
     {
       actionId: 'view.toggleSidebar',
       icon: <TitlebarIcon name="layout-sidebar-left" />,

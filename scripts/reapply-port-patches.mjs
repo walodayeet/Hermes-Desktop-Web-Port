@@ -88,6 +88,20 @@ patchFile(
   '@custom-variant dark (&:is(.dark *));',
   `@custom-variant dark (&:is(.dark *));
 
+/* Web port (mobile): the desktop UI is tuned for a 1200px+ window with a
+   mouse. On a phone the default 16px root makes icon buttons ~24px — hard
+   to hit. Bump the root size so every rem-based dimension (buttons, icons,
+   padding, touch targets) scales up together; the layout is already
+   responsive enough that this mostly enlarges chrome, not breaks it. */
+@media (max-width: 767px) {
+  :root {
+    --dt-base-size: 1.125rem;
+  }
+  html {
+    font-size: 18px;
+  }
+}
+
 /* Web port (iOS): Safari auto-zooms into any form field whose font-size is
    below 16px on focus. The app's compact input styles (12–14px) trigger it
    on iPhone. Floor the size at the form-field level only — conversation
@@ -255,6 +269,34 @@ patchFile(
   '}, [plugin, text])',
   '}, [plugin])',
   '}, [plugin, text])',
+)
+
+// --- titlebar-controls.tsx: mobile command-palette button --------------------------
+patchFile(
+  'app/shell/titlebar-controls.tsx',
+  "import { openCommandPalette } from '@/store/command-palette'",
+  "import { hudTargetSessionId } from '@/app/hud/handoff'",
+  `import { hudTargetSessionId } from '@/app/hud/handoff'
+import { openCommandPalette } from '@/store/command-palette'`,
+)
+patchFile(
+  'app/shell/titlebar-controls.tsx',
+  "// Web port (mobile): the command palette is ⌘K-only on desktop; touch",
+  'const leftToolbarTools: TitlebarTool[] = [',
+  `const leftToolbarTools: TitlebarTool[] = [
+    {
+      // Web port (mobile): the command palette is ⌘K-only on desktop; touch
+      // devices have no keybind, so expose a visible trigger on small screens.
+      actionId: 'nav.commandPalette',
+      className: 'md:hidden',
+      icon: <TitlebarIcon name="search" />,
+      id: 'command-palette',
+      label: t.commandCenter.paletteTitle,
+      onSelect: () => {
+        triggerHaptic('open')
+        openCommandPalette()
+      }
+    },`,
 )
 
 if (touched === 0) {

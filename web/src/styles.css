@@ -12,6 +12,20 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Web port (mobile): the desktop UI is tuned for a 1200px+ window with a
+   mouse. On a phone the default 16px root makes icon buttons ~24px — hard
+   to hit. Bump the root size so every rem-based dimension (buttons, icons,
+   padding, touch targets) scales up together; the layout is already
+   responsive enough that this mostly enlarges chrome, not breaks it. */
+@media (max-width: 767px) {
+  :root {
+    --dt-base-size: 1.125rem;
+  }
+  html {
+    font-size: 18px;
+  }
+}
+
 /* Web port (iOS): Safari auto-zooms into any form field whose font-size is
    below 16px on focus. The app's compact input styles (12–14px) trigger it
    on iPhone. Floor the size at the form-field level only — conversation
