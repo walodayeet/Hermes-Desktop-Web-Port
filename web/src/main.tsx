@@ -18,11 +18,6 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { HashRouter } from 'react-router'
 
-import App from './app'
-import { RootErrorBoundary } from './components/error-boundary'
-import { HapticsProvider } from './components/haptics-provider'
-import { RootTooltipProvider } from './components/ui/tooltip'
-import { I18nProvider } from './i18n'
 // Web port: the bridge self-installs at module scope below — this import MUST
 // stay ahead of `./app` (module bodies evaluate in import order), so
 // window.hermesDesktop exists before the app's module-scope plugin discovery
@@ -32,6 +27,11 @@ import './web-bridge'
 // Web port: session-cookie auth gate. Boots the app only when authenticated.
 import { runLoginGate } from './login-gate'
 
+import App from './app'
+import { RootErrorBoundary } from './components/error-boundary'
+import { HapticsProvider } from './components/haptics-provider'
+import { RootTooltipProvider } from './components/ui/tooltip'
+import { I18nProvider } from './i18n'
 import { installClipboardShim } from './lib/clipboard'
 import { queryClient } from './lib/query-client'
 import { ThemeProvider } from './themes/context'

@@ -45,10 +45,15 @@ function patchFile(rel, marker, find, insert) {
 console.log('reapplying port patches…')
 
 // --- main.tsx: bridge import + login-gate boot wrapper ----------------------
+// CRITICAL: the bridge import must sit BEFORE `import App from './app'` —
+// ES modules evaluate in SOURCE ORDER, and the app graph's module-scope
+// plugin discovery (app/contrib/controller.tsx → watchRuntimePlugins →
+// scanDiskPlugins) checks `window.hermesDesktop` at module scope. If App
+// evaluates first, the disk scan bails (`!desktop`) and plugins never load.
 patchFile(
   'main.tsx',
   'import \'./web-bridge\'',
-  "import { installClipboardShim } from './lib/clipboard'",
+  "import App from './app'",
   `// Web port: the bridge self-installs at module scope below — this import MUST
 // stay ahead of \`./app\` (module bodies evaluate in import order), so
 // window.hermesDesktop exists before the app's module-scope plugin discovery
@@ -58,7 +63,7 @@ import './web-bridge'
 // Web port: session-cookie auth gate. Boots the app only when authenticated.
 import { runLoginGate } from './login-gate'
 
-import { installClipboardShim } from './lib/clipboard'`,
+import App from './app'`,
 )
 patchFile(
   'main.tsx',
