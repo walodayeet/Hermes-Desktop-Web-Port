@@ -198,6 +198,13 @@ export function reviewCommentBlock(detail: string): null | string {
 }
 
 export function pathLabel(path: string): string {
+  // Web port: virtual web-input:<n> paths carry the real filename in the
+  // bridge's File object. Resolve it so chips/refs show e.g. "voice-memo.m4a"
+  // instead of the opaque "web-input:2".
+  if (path.startsWith('web-input:')) {
+    const real = window.hermesDesktop?.fileNameForPath?.(path)
+    if (real) return real
+  }
   return path.split(/[\\/]/).filter(Boolean).pop() || path
 }
 

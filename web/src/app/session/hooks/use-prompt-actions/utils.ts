@@ -273,6 +273,13 @@ export function base64FromDataUrl(dataUrl: string): string {
 }
 
 export function imageFilenameFromPath(filePath: string): string {
+  // Web port: virtual web-input:<n> paths carry the real filename in the
+  // bridge's File object — use it so image.attach_bytes uploads keep the
+  // original name/extension (e.g. photo.jpg) instead of "web-input:3".
+  if (filePath.startsWith('web-input:')) {
+    const real = window.hermesDesktop?.fileNameForPath?.(filePath)
+    if (real) return real
+  }
   return filePath.split(/[\\/]/).filter(Boolean).pop() || 'image.png'
 }
 

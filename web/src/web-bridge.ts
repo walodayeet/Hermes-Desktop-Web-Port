@@ -662,6 +662,12 @@ export function installWebBridge(): void {
     // the renderer's pickers therefore get virtual web-input:<n> paths backed
     // by File objects, which readFileText/readFileDataUrl resolve above.
     selectPaths: async (options) => pickWebFiles(options?.multiple !== false, options?.filters?.[0]?.extensions?.join(',')),
+    // Real filename for a virtual web-input:<n> path (the File object keeps
+    // its original name — e.g. "voice-memo.m4a" — while the path is just the
+    // sequence key). Lets pathLabel/imageFilenameFromPath show and upload
+    // with the true name instead of the opaque web-input:N. Non-virtual
+    // paths return null so callers fall back to path parsing.
+    fileNameForPath: (filePath) => webFileForKey(filePath)?.name ?? null,
     writeClipboard: async (text) => {
       try {
         await navigator.clipboard.writeText(text)

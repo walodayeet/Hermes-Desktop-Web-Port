@@ -299,6 +299,45 @@ patchFile(
     },`,
 )
 
+// --- lib/chat-runtime.ts + use-prompt-actions/utils.ts: real filenames for web-input paths -----
+// The bridge exposes fileNameForPath (web-input:<n> -> File.name). These two
+// synced helpers must consult it so chips/refs and attach_bytes/uploads carry
+// the original filename+extension instead of the opaque "web-input:N".
+patchFile(
+  'lib/chat-runtime.ts',
+  '// Web port: virtual web-input:<n> paths carry the real filename in the',
+  'export function pathLabel(path: string): string {',
+  `export function pathLabel(path: string): string {
+  // Web port: virtual web-input:<n> paths carry the real filename in the
+  // bridge's File object. Resolve it so chips/refs show e.g. "voice-memo.m4a"
+  // instead of the opaque "web-input:2".
+  if (path.startsWith('web-input:')) {
+    const real = window.hermesDesktop?.fileNameForPath?.(path)
+    if (real) return real
+  }`,
+)
+patchFile(
+  'app/session/hooks/use-prompt-actions/utils.ts',
+  '// Web port: virtual web-input:<n> paths carry the real filename in the',
+  'export function imageFilenameFromPath(filePath: string): string {',
+  `export function imageFilenameFromPath(filePath: string): string {
+  // Web port: virtual web-input:<n> paths carry the real filename in the
+  // bridge's File object — use it so image.attach_bytes uploads keep the
+  // original name/extension (e.g. photo.jpg) instead of "web-input:3".
+  if (filePath.startsWith('web-input:')) {
+    const real = window.hermesDesktop?.fileNameForPath?.(filePath)
+    if (real) return real
+  }`,
+)
+patchFile(
+  'global.d.ts',
+  '/** Web port: real filename for a virtual web-input:<n> path, else null. */',
+  '      selectPaths: (options?: HermesSelectPathsOptions) => Promise<string[]>',
+  `      selectPaths: (options?: HermesSelectPathsOptions) => Promise<string[]>
+      /** Web port: real filename for a virtual web-input:<n> path, else null. */
+      fileNameForPath?: (filePath: string) => string | null`,
+)
+
 if (touched === 0) {
   console.log('no patches applied (all present)')
 } else {

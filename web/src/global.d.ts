@@ -157,6 +157,8 @@ declare global {
       }
       readFileText: (filePath: string) => Promise<HermesReadFileTextResult>
       selectPaths: (options?: HermesSelectPathsOptions) => Promise<string[]>
+      /** Web port: real filename for a virtual web-input:<n> path, else null. */
+      fileNameForPath?: (filePath: string) => string | null
       /** Native save dialog; returns the chosen path or null on cancel. */
       selectSavePath?: (options?: {
         defaultPath?: string
