@@ -58,6 +58,30 @@ host/server. Point `HERMES_TARGET` at it:
 
 ## Run without Docker
 
+The launcher mirrors the [hermes-webui](https://github.com/nesquena/hermes-webui)
+project's workflow — clone, `./start.sh`, done. `start.sh` (bash wrapper) loads
+`.env`, pre-flights, then delegates to `scripts/bootstrap.py` (Python 3,
+stdlib only): installs deps if missing, builds the renderer if needed, starts
+the proxy, waits for health, and opens the browser.
+
+```sh
+./start.sh                # install + build + start + open browser
+./start.sh --no-browser   # server only
+./start.sh --port 8080    # different port (or PORT=8080 ./start.sh)
+./start.sh --rebuild      # force a renderer rebuild
+```
+
+Daemon control (like webui's `ctl.sh`):
+
+```sh
+./ctl.sh start            # background daemon (pid + log in ~/.hermes)
+./ctl.sh status           # PID, uptime, health
+./ctl.sh logs --follow    # tail the log
+./ctl.sh stop / restart
+```
+
+Manual (the old way):
+
 ```sh
 npm install
 npm run build        # build the renderer (web/)
@@ -123,7 +147,10 @@ Anyone who logs in gets agent-level control of the host.
 web/       — the desktop app's renderer (copied) + web-bridge.ts + login-gate.ts
 shared/    — @hermes/shared package (gateway client, ws-url, billing types)
 proxy/     — zero-dep Node same-origin facade (HTTP + WS passthrough, static)
-scripts/   — reapply-port-patches.mjs (idempotent post-sync patcher)
+scripts/   — bootstrap.py (webui-style launcher), sync-renderer.sh,
+             reapply-port-patches.mjs (idempotent post-sync patcher)
+start.sh   — webui-style entry point (clone → ./start.sh → done)
+ctl.sh     — daemon controller (start/stop/restart/status/logs)
 ```
 
 ## Upstream sync
