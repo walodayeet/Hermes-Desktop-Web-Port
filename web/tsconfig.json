@@ -56,10 +56,5 @@
     "playwright.config.ts",
     "**/*.test.ts",
     "**/*.test.tsx"
-  ],
-  "references": [
-    {
-      "path": "./tsconfig.electron.json"
-    }
   ]
 }
