@@ -116,6 +116,16 @@ function webFileForKey(key: string): File | null {
   return key.startsWith('web-input:') ? webInputFiles.get(key) ?? null : null
 }
 
+/** Store a Blob/File under a fresh virtual web-input path (paste, buffer
+ *  save, drag-drop). Returns the virtual path the renderer can attach. */
+function saveWebBlob(blob: Blob, filename: string): string {
+  webInputSeq += 1
+  const key = `web-input:${webInputSeq}`
+  const file = new File([blob], filename, { type: blob.type || 'application/octet-stream' })
+  webInputFiles.set(key, file)
+  return key
+}
+
 function readWebFileDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -579,11 +589,33 @@ export function installWebBridge(): void {
         return false
       }
     },
-    saveImageBuffer: async () => {
-      throw new Error('unsupported-in-web')
+    saveImageBuffer: async (data, ext) => {
+      // Web port: stash the raw bytes as a virtual web-input:<n> file so the
+      // app's normal attach path (readFileDataUrl → image.attach_bytes) works.
+      try {
+        const bytes = data instanceof Uint8Array ? data : new Uint8Array(data ?? [])
+        const mime = ext ? `image/${ext.replace(/^\./, '')}` : 'application/octet-stream'
+        const blob = new Blob([bytes.buffer as ArrayBuffer], { type: mime })
+        return saveWebBlob(blob, ext ? `clipboard.${ext.replace(/^\./, '')}` : 'clipboard.bin')
+      } catch {
+        throw new Error('unsupported-in-web')
+      }
     },
     saveClipboardImage: async () => {
-      throw new Error('unsupported-in-web')
+      // Web port: read an image off the clipboard (Async Clipboard API), then
+      // stash it as a virtual web-input file. The renderer's paste-image flow
+      // calls saveClipboardImage() and attaches the returned path.
+      try {
+        const items = await navigator.clipboard.read()
+        const item = items.find(i => i.types.some(t => t.startsWith('image/')))
+        if (!item) return ''
+        const type = item.types.find(t => t.startsWith('image/'))!
+        const blob = await item.getType(type)
+        const ext = type.split('/')[1] ?? 'png'
+        return saveWebBlob(blob, `clipboard.${ext}`)
+      } catch {
+        return ''
+      }
     },
     getPathForFile: () => '',
     normalizePreviewTarget: async () => null,

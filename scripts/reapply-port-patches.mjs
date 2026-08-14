@@ -91,11 +91,29 @@ patchFile(
 /* Web port (iOS): Safari auto-zooms into any form field whose font-size is
    below 16px on focus. The app's compact input styles (12–14px) trigger it
    on iPhone. Floor the size at the form-field level only — conversation
-   text, titles, and chrome keep their design sizes. */
+   text, titles, and chrome keep their design sizes. contentEditable is
+   included: the composer is a contentEditable div, not a textarea. */
 input,
 textarea,
-select {
+select,
+[contenteditable='true'],
+[contenteditable=''] {
   font-size: 16px;
+}
+
+/* Web port (iOS): suppress double-tap / double-click zoom on interactive
+   elements. Safari zooms on a fast second tap; \`manipulation\` tells it the
+   gesture is a tap action, not a zoom gesture. Combined with the viewport
+   \`user-scalable=no\` this kills the accidental zoom entirely. */
+button,
+a,
+[role='button'],
+input,
+textarea,
+select,
+[contenteditable='true'],
+[contenteditable=''] {
+  touch-action: manipulation;
 }`,
 )
 
@@ -160,6 +178,83 @@ patchFile(
       return
     }
     notifyError(err, translateNow('commandCenter.gatewayRestartFailed'))`,
+)
+
+// --- use-prompt-actions/index.ts: web-input paths always upload bytes ----------------
+patchFile(
+  'app/session/hooks/use-prompt-actions/index.ts',
+  'Web port: virtual web-input:<n> paths',
+  'function attachmentPathNeedsUpload(path: string, backendCwd?: null | string, terminalBackend?: string): boolean {',
+  `function attachmentPathNeedsUpload(path: string, backendCwd?: null | string, terminalBackend?: string): boolean {
+  // Web port: virtual web-input:<n> paths are browser File objects, not real
+  // disk paths — the backend can never read them, so they ALWAYS upload bytes.
+  if (path.startsWith('web-input:')) {
+    return true
+  }`,
+)
+
+// --- statusbar-prefs.ts: context meter visible by default -----------------------------
+patchFile(
+  'store/statusbar-prefs.ts',
+  'removed in the web port: the context meter',
+  "'approval-mode',",
+  `'approval-mode',
+  // 'context-usage' removed in the web port: the context meter is one of the
+  // few status readouts the user asked to always see.`,
+)
+
+// --- controller.tsx: shell uses dvh (iOS dynamic viewport height) ---------------------
+patchFile(
+  'app/contrib/controller.tsx',
+  'h-dvh min-h-0 flex-col bg-background',
+  'className="h-screen min-h-0 flex-col bg-background"',
+  'className="h-dvh min-h-0 flex-col bg-background"',
+)
+patchFile(
+  'app/contrib/controller.tsx',
+  'flex h-dvh min-h-0 w-screen flex-col',
+  'className="flex h-screen min-h-0 w-screen flex-col',
+  'className="flex h-dvh min-h-0 w-screen flex-col',
+)
+
+// --- markdown-text.tsx: only fetch 18MB shiki when a code fence exists -----------------
+patchFile(
+  'components/assistant-ui/markdown-text.tsx',
+  'Web port: @streamdown/code statically pulls',
+  'function useCodePlugin(): CodePlugin | null {',
+  `function useCodePlugin(text: string): CodePlugin | null {`,
+)
+patchFile(
+  'components/assistant-ui/markdown-text.tsx',
+  'Web port: @streamdown/code statically pulls',
+  '  useEffect(() => {\n    if (plugin) {\n      return\n    }\n\n    let cancelled = false',
+  `  useEffect(() => {
+    if (plugin) {
+      return
+    }
+
+    // Web port: @streamdown/code statically pulls the entire ~18MB shiki
+    // bundle. On the desktop it's a local-disk read (instant); over HTTP it
+    // is a real download that stalls every plain-text chat. Only fetch it
+    // when this message actually contains a fenced code block — messages
+    // without one never pay for syntax highlighting.
+    if (!/(^|\\n)\\s*(\\\`\\\`\\\`|~~~)/.test(text)) {
+      return
+    }
+
+    let cancelled = false`,
+)
+patchFile(
+  'components/assistant-ui/markdown-text.tsx',
+  'const code = useCodePlugin(text)',
+  'const code = useCodePlugin()',
+  'const code = useCodePlugin(text)',
+)
+patchFile(
+  'components/assistant-ui/markdown-text.tsx',
+  '}, [plugin, text])',
+  '}, [plugin])',
+  '}, [plugin, text])',
 )
 
 if (touched === 0) {

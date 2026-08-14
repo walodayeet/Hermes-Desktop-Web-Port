@@ -62,11 +62,20 @@ const mathPlugin = createMemoizedMathPlugin({ singleDollarTextMath: true })
 type CodePlugin = typeof streamdownCode
 let codePluginCache: CodePlugin | null = null
 
-function useCodePlugin(): CodePlugin | null {
+function useCodePlugin(text: string): CodePlugin | null {
   const [plugin, setPlugin] = useState(codePluginCache)
 
   useEffect(() => {
     if (plugin) {
+      return
+    }
+
+    // Web port: @streamdown/code statically pulls the entire ~18MB shiki
+    // bundle. On the desktop it's a local-disk read (instant); over HTTP it
+    // is a real download that stalls every plain-text chat. Only fetch it
+    // when this message actually contains a fenced code block — messages
+    // without one never pay for syntax highlighting.
+    if (!/(^|\n)\s*(```|~~~)/.test(text)) {
       return
     }
 
@@ -83,7 +92,7 @@ function useCodePlugin(): CodePlugin | null {
     return () => {
       cancelled = true
     }
-  }, [plugin])
+  }, [plugin, text])
 
   return plugin
 }
@@ -475,7 +484,7 @@ function MarkdownTextSurface({
   // render as code cards. The expensive Shiki pass is deferred by
   // `SyntaxHighlighter` below when `isStreaming` is true, and the code plugin
   // itself arrives async (useCodePlugin) so shiki never blocks cold start.
-  const code = useCodePlugin()
+  const code = useCodePlugin(text)
   const plugins = useMemo(() => (code ? { math: mathPlugin, code } : { math: mathPlugin }), [code])
 
   const components = useMemo(

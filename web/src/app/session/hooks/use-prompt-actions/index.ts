@@ -97,6 +97,12 @@ const CONTAINER_TERMINAL_BACKENDS = new Set(['docker', 'ssh', 'singularity', 'mo
 // (docker, ssh, ...) always need bytes: the sandbox has its own filesystem and
 // the host path would dangle inside it (#76577).
 function attachmentPathNeedsUpload(path: string, backendCwd?: null | string, terminalBackend?: string): boolean {
+  // Web port: virtual web-input:<n> paths are browser File objects, not real
+  // disk paths — the backend can never read them, so they ALWAYS upload bytes.
+  if (path.startsWith('web-input:')) {
+    return true
+  }
+
   if (CONTAINER_TERMINAL_BACKENDS.has((terminalBackend || '').trim().toLowerCase())) {
     return true
   }

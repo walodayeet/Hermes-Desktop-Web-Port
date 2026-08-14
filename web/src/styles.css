@@ -15,11 +15,29 @@
 /* Web port (iOS): Safari auto-zooms into any form field whose font-size is
    below 16px on focus. The app's compact input styles (12–14px) trigger it
    on iPhone. Floor the size at the form-field level only — conversation
-   text, titles, and chrome keep their design sizes. */
+   text, titles, and chrome keep their design sizes. contentEditable is
+   included: the composer is a contentEditable div, not a textarea. */
 input,
 textarea,
-select {
+select,
+[contenteditable='true'],
+[contenteditable=''] {
   font-size: 16px;
+}
+
+/* Web port (iOS): suppress double-tap / double-click zoom on interactive
+   elements. Safari zooms on a fast second tap; `manipulation` tells it the
+   gesture is a tap action, not a zoom gesture. Combined with the viewport
+   `user-scalable=no` this kills the accidental zoom entirely. */
+button,
+a,
+[role='button'],
+input,
+textarea,
+select,
+[contenteditable='true'],
+[contenteditable=''] {
+  touch-action: manipulation;
 }
 
 /* Blanket reduced-motion override: kill ALL CSS animations and transitions
