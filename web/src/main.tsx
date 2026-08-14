@@ -23,6 +23,15 @@ import { RootErrorBoundary } from './components/error-boundary'
 import { HapticsProvider } from './components/haptics-provider'
 import { RootTooltipProvider } from './components/ui/tooltip'
 import { I18nProvider } from './i18n'
+// Web port: the bridge self-installs at module scope below — this import MUST
+// stay ahead of `./app` (module bodies evaluate in import order), so
+// window.hermesDesktop exists before the app's module-scope plugin discovery
+// (app/contrib/controller.tsx → watchRuntimePlugins) runs.
+import './web-bridge'
+
+// Web port: session-cookie auth gate. Boots the app only when authenticated.
+import { runLoginGate } from './login-gate'
+
 import { installClipboardShim } from './lib/clipboard'
 import { queryClient } from './lib/query-client'
 import { ThemeProvider } from './themes/context'
@@ -50,7 +59,8 @@ if (winParam === 'overlay') {
 } else if (winParam === 'wake') {
   void import('./app/wake-indicator/wake-indicator-root').then(({ mountWakeIndicator }) => mountWakeIndicator())
 } else {
-  createRoot(document.getElementById('root')!).render(
+  void runLoginGate().then(() => {
+    createRoot(document.getElementById('root')!).render(
     <StrictMode>
       <RootErrorBoundary>
         <QueryClientProvider client={queryClient}>
@@ -82,5 +92,6 @@ if (winParam === 'overlay') {
         </QueryClientProvider>
       </RootErrorBoundary>
     </StrictMode>
-  )
+    )
+  })
 }

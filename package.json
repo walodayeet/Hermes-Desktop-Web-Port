@@ -11,7 +11,7 @@
     "dev": "npm run dev --workspace web",
     "build": "npm run build --workspace web",
     "start": "npm run start --workspace proxy",
-    "sync:renderer": "rsync -a --delete --exclude=web-bridge.ts --exclude=login-gate.ts ~/.hermes/hermes-agent/apps/desktop/src/ web/src/ && rsync -a --delete ~/.hermes/hermes-agent/apps/shared/src/ shared/src/ && find shared/src web/src -name \"*.test.*\" -delete && echo \"synced (web-bridge.ts, login-gate.ts preserved)\""
+    "sync:renderer": "rsync -a --delete --exclude=web-bridge.ts --exclude=login-gate.ts ~/.hermes/hermes-agent/apps/desktop/src/ web/src/ && rsync -a --delete ~/.hermes/hermes-agent/apps/shared/src/ shared/src/ && find shared/src web/src -name \"*.test.*\" -delete && node scripts/reapply-port-patches.mjs web/src && echo \"synced (web-bridge.ts, login-gate.ts preserved, port patches reapplied)\""
   },
   "overrides": {
     "@types/react": "19.2.17",

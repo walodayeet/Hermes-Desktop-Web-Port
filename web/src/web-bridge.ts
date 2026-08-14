@@ -66,35 +66,48 @@ function pickWebFiles(multiple: boolean, accept?: string): Promise<string[]> {
     if (accept) input.accept = accept
     input.style.display = 'none'
     document.body.appendChild(input)
-    const cleanup = () => {
+
+    let settled = false
+    let pending: File[] = []
+    const settle = (paths: string[]) => {
+      if (settled) return
+      settled = true
       input.remove()
-      document.removeEventListener('focus', cleanup)
-    }
-    document.addEventListener('focus', cleanup, { once: true })
-    input.onchange = () => {
-      const files = [...(input.files ?? [])]
-      cleanup()
-      if (!files.length) {
-        resolve([])
-        return
-      }
-      const paths = files.map((file) => {
-        webInputSeq += 1
-        const key = `web-input:${webInputSeq}`
-        webInputFiles.set(key, file)
-        return key
-      })
+      window.removeEventListener('focus', onWindowFocus)
       resolve(paths)
     }
+
+    // iOS/desktop both fire `change` when files are picked. BUT on iOS Safari
+    // the window `focus` event (picker closing) can arrive BEFORE `change`,
+    // and the picker's closing also fires `focus` when the page re-gains it.
+    // Resolving on that focus with an empty file list drops the selection.
+    // So: stash the files on `change` first, and only resolve the picker as
+    // CANCELLED on focus when NO change ever fired.
+    const onWindowFocus = () => {
+      // Give `change` a beat to land (iOS dispatches it after focus).
+      setTimeout(() => {
+        if (!settled && input.files?.length) return
+        if (!settled) settle([])
+      }, 0)
+    }
+
+    input.onchange = () => {
+      pending = [...(input.files ?? [])]
+      if (!pending.length) {
+        settle([])
+        return
+      }
+      settle(
+        pending.map((file) => {
+          webInputSeq += 1
+          const key = `web-input:${webInputSeq}`
+          webInputFiles.set(key, file)
+          return key
+        })
+      )
+    }
     // Cancel (Escape / backdrop click) also resolves empty.
-    window.addEventListener(
-      'focus',
-      () => {
-        // No files chosen when the picker closes without change.
-        if (!input.files?.length) resolve([])
-      },
-      { once: true },
-    )
+    window.addEventListener('focus', onWindowFocus, { once: true })
     input.click()
   })
 }
