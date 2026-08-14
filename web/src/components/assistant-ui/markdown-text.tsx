@@ -75,7 +75,7 @@ function useCodePlugin(text: string): CodePlugin | null {
     // is a real download that stalls every plain-text chat. Only fetch it
     // when this message actually contains a fenced code block — messages
     // without one never pay for syntax highlighting.
-    if (!/(^|\n)\s*(```|~~~)/.test(text)) {
+    if (!/(^|\n)\s*(\`\`\`|~~~)/.test(text)) {
       return
     }
 

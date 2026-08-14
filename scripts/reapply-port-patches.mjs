@@ -155,10 +155,13 @@ patchFile(
 )
 
 // --- titlebar.ts: safe-area top ------------------------------------------------------
+// REPLACE the upstream header class with the safe-area variant — an insert
+// would leave BOTH lines (adjacent-string concat, wrong classes).
 patchFile(
   'app/shell/titlebar.ts',
   'pt-[var(--safe-area-top,0px)]',
-  'export const titlebarHeaderBaseClass =',
+  `export const titlebarHeaderBaseClass =
+  'pointer-events-none relative z-3 flex h-(--titlebar-height) w-full min-w-0 shrink-0 items-center justify-start gap-3 overflow-hidden border-b border-(--ui-stroke-tertiary) bg-(--ui-chat-surface-background) px-[max(0.75rem,var(--titlebar-content-inset,0rem))] pr-[calc(var(--titlebar-tools-right,0.75rem)+var(--titlebar-tools-width,0px)+0.75rem)]'`,
   `export const titlebarHeaderBaseClass =
   'pointer-events-none relative z-3 flex h-[calc(var(--titlebar-height)+var(--safe-area-top,0px))] w-full min-w-0 shrink-0 items-center justify-start gap-3 overflow-hidden border-b border-(--ui-stroke-tertiary) bg-(--ui-chat-surface-background) px-[max(0.75rem,var(--titlebar-content-inset,0rem))] pr-[calc(var(--titlebar-tools-right,0.75rem)+var(--titlebar-tools-width,0px)+0.75rem)] pt-[var(--safe-area-top,0px)]'`,
 )
@@ -208,10 +211,14 @@ patchFile(
 )
 
 // --- statusbar-prefs.ts: context meter visible by default -----------------------------
+// ONE atomic edit: replace the `'context-usage',` entry with the explanatory
+// comment, so the meter is NOT hidden by default. Upstream ships it hidden;
+// without the removal part the next sync would silently revert the visibility.
 patchFile(
   'store/statusbar-prefs.ts',
   'removed in the web port: the context meter',
-  "'approval-mode',",
+  `'approval-mode',
+  'context-usage',`,
   `'approval-mode',
   // 'context-usage' removed in the web port: the context meter is one of the
   // few status readouts the user asked to always see.`,

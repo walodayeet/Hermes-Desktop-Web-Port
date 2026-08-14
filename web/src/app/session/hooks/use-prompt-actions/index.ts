@@ -102,7 +102,6 @@ function attachmentPathNeedsUpload(path: string, backendCwd?: null | string, ter
   if (path.startsWith('web-input:')) {
     return true
   }
-
   if (CONTAINER_TERMINAL_BACKENDS.has((terminalBackend || '').trim().toLowerCase())) {
     return true
   }
