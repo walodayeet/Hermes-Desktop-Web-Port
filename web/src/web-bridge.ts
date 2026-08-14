@@ -50,6 +50,87 @@ function wsBase(): string {
   return `${proto}//${window.location.host}`
 }
 
+// Web port: the browser cannot hand the renderer real filesystem paths, so
+// file selection uses a hidden <input type=file> whose File objects are kept
+// in this map under virtual `web-input:<n>` paths. readFileDataUrl /
+// readFileText resolve those keys (the composer's "add context" flow calls
+// selectPaths then reads each path's data URL).
+const webInputFiles = new Map<string, File>()
+let webInputSeq = 0
+
+function pickWebFiles(multiple: boolean, accept?: string): Promise<string[]> {
+  return new Promise((resolve) => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.multiple = multiple
+    if (accept) input.accept = accept
+    input.style.display = 'none'
+    document.body.appendChild(input)
+    const cleanup = () => {
+      input.remove()
+      document.removeEventListener('focus', cleanup)
+    }
+    document.addEventListener('focus', cleanup, { once: true })
+    input.onchange = () => {
+      const files = [...(input.files ?? [])]
+      cleanup()
+      if (!files.length) {
+        resolve([])
+        return
+      }
+      const paths = files.map((file) => {
+        webInputSeq += 1
+        const key = `web-input:${webInputSeq}`
+        webInputFiles.set(key, file)
+        return key
+      })
+      resolve(paths)
+    }
+    // Cancel (Escape / backdrop click) also resolves empty.
+    window.addEventListener(
+      'focus',
+      () => {
+        // No files chosen when the picker closes without change.
+        if (!input.files?.length) resolve([])
+      },
+      { once: true },
+    )
+    input.click()
+  })
+}
+
+function webFileForKey(key: string): File | null {
+  return key.startsWith('web-input:') ? webInputFiles.get(key) ?? null : null
+}
+
+function readWebFileDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result ?? ''))
+    reader.onerror = () => reject(new Error('file read failed'))
+    reader.readAsDataURL(file)
+  })
+}
+
+function readWebFileText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result ?? ''))
+    reader.onerror = () => reject(new Error('file read failed'))
+    reader.readAsText(file)
+  })
+}
+
+/** Best-effort filename for a downloaded URL (path basename, else timestamp). */
+function imageFileNameFromUrl(url: string): string {
+  try {
+    const name = decodeURIComponent(new URL(url).pathname.split('/').pop() ?? '')
+    return name || `download-${Date.now()}`
+  } catch {
+    return `download-${Date.now()}`
+  }
+}
+
 /** Mint a single-use WS ticket (v0.20.0 cookie auth), then build the URL. */
 async function mintWsUrl(profile?: null | string): Promise<string> {
   const { ticket } = await fetchJson<{ ticket: string }>('/api/auth/ws-ticket', {
@@ -60,6 +141,138 @@ async function mintWsUrl(profile?: null | string): Promise<string> {
     authParam: ['ticket', ticket],
   })
 }
+
+// --- terminal: real PTY over /web-term WS -------------------------------------
+
+interface TermSession {
+  id: string
+  ws: WebSocket
+  cwd: string
+  dataListener: ((data: string) => void) | null
+  exitListener: ((p: { code: number | null; signal: string | null }) => void) | null
+  dataBuf: string[]
+  exit: { code: number | null; signal: string | null } | null
+}
+
+function makeTerminal() {
+  const sessions = new Map<string, TermSession>()
+  let seq = 0
+
+  const openSession = (opts?: { cols?: number; cwd?: string; rows?: number }) =>
+    new Promise<TermSession>((resolve, reject) => {
+      const id = `term-${Date.now().toString(36)}-${++seq}`
+      const q = new URLSearchParams()
+      if (opts?.cwd) q.set('cwd', opts.cwd)
+      q.set('cols', String(opts?.cols ?? 80))
+      q.set('rows', String(opts?.rows ?? 24))
+
+      const session: TermSession = {
+        id,
+        ws: null as unknown as WebSocket,
+        cwd: opts?.cwd ?? '',
+        dataListener: null,
+        exitListener: null,
+        dataBuf: [],
+        exit: null,
+      }
+      sessions.set(id, session)
+
+      const ws = new WebSocket(`${wsBase()}/web-term?${q.toString()}`)
+      session.ws = ws
+
+      ws.addEventListener('open', () => resolve(session), { once: true })
+      ws.addEventListener(
+        'error',
+        () => {
+          sessions.delete(id)
+          reject(new Error('terminal ws connect failed'))
+        },
+        { once: true },
+      )
+
+      ws.addEventListener('message', (ev) => {
+        let msg: { type?: string; data?: string; code?: number | null; signal?: string | null }
+        try {
+          msg = JSON.parse(String(ev.data))
+        } catch {
+          return
+        }
+        if (msg.type === 'output' && typeof msg.data === 'string') {
+          if (session.dataListener) session.dataListener(msg.data)
+          else session.dataBuf.push(msg.data)
+        } else if (msg.type === 'exit') {
+          const payload = { code: msg.code ?? null, signal: msg.signal ?? null }
+          session.exit = payload
+          if (session.exitListener) session.exitListener(payload)
+        }
+      })
+
+      ws.addEventListener('close', () => {
+        sessions.delete(id)
+        if (!session.exit) {
+          const payload = { code: null, signal: null }
+          session.exit = payload
+          if (session.exitListener) session.exitListener(payload)
+        }
+      })
+    })
+
+  return {
+    cwd: async () => null,
+    dispose: async (id: string) => {
+      const s = sessions.get(id)
+      if (!s) return false
+      sessions.delete(id)
+      try {
+        s.ws.close()
+      } catch {
+        /* ignore */
+      }
+      return true
+    },
+    onData: (id: string, callback: (data: string) => void) => {
+      const s = sessions.get(id)
+      if (!s) return () => {}
+      s.dataListener = callback
+      if (s.dataBuf.length) {
+        const buf = s.dataBuf
+        s.dataBuf = []
+        for (const d of buf) callback(d)
+      }
+      return () => {
+        if (s.dataListener === callback) s.dataListener = null
+      }
+    },
+    onExit: (id: string, callback: (p: { code: number | null; signal: string | null }) => void) => {
+      const s = sessions.get(id)
+      if (!s) return () => {}
+      s.exitListener = callback
+      if (s.exit) callback(s.exit)
+      return () => {
+        if (s.exitListener === callback) s.exitListener = null
+      }
+    },
+    resize: async (id: string, size: { cols: number; rows: number }) => {
+      const s = sessions.get(id)
+      if (!s || s.ws.readyState !== WebSocket.OPEN) return false
+      s.ws.send(JSON.stringify({ type: 'resize', cols: size.cols, rows: size.rows }))
+      return true
+    },
+    start: async (opts?: { cols?: number; cwd?: string; rows?: number }) => {
+      const session = await openSession(opts)
+      // The server shells with process.env.SHELL || /bin/bash; report a sane
+      // fallback so the renderer's drop-path quoting stays correct.
+      return { id: session.id, cwd: session.cwd, shell: 'bash' }
+    },
+    write: async (id: string, data: string) => {
+      const s = sessions.get(id)
+      if (!s || s.ws.readyState !== WebSocket.OPEN) return false
+      s.ws.send(JSON.stringify({ type: 'input', data }))
+      return true
+    },
+  }
+}
+
 
 // ── bridge ──────────────────────────────────────────────────────────────────
 
@@ -280,21 +493,38 @@ export function installWebBridge(): void {
     requestMicrophoneAccess: async () => false,
 
     // --- files / clipboard: browser-native -----------------------------------------
-    readFileDataUrl: async () => {
-      throw new Error('unsupported-in-web')
+    readFileDataUrl: async (filePath) => {
+      const picked = webFileForKey(filePath)
+      if (picked) return readWebFileDataUrl(picked)
+      const res = await fetch(`/web-fs/read-data-url?path=${encodeURIComponent(filePath)}`)
+      if (!res.ok) throw new Error(`web-fs: HTTP ${res.status}`)
+      const json = await res.json()
+      return json.dataUrl as string
     },
     // Desktop-plugins door: the runtime loader reads `<hermes home>/desktop-plugins/<name>/plugin.js`
     // off local disk in Electron. In the web port that disk is the proxy host's folder,
-    // exposed as a virtual `/plugins` root via /api/plugins-door/*. Only that root is
-    // served — everything else keeps the old empty result.
+    // exposed as a virtual `/plugins` root via /api/plugins-door/*. Everything else
+    // resolves against the proxy's /web-fs door (WEB_FS_ROOT).
     desktopPluginsRoot: async () => '/plugins',
-    readFileText: async (path) => {
-      if (!path?.startsWith('/plugins/')) return { path: '', text: '' }
-      const res = await fetch(`/api/plugins-door/file?path=${encodeURIComponent(path)}`)
-      if (!res.ok) throw new Error(`plugin door: HTTP ${res.status}`)
+    readFileText: async (filePath) => {
+      const picked = webFileForKey(filePath)
+      if (picked) {
+        const text = await readWebFileText(picked)
+        return { path: filePath, text }
+      }
+      if (filePath?.startsWith('/plugins/')) {
+        const res = await fetch(`/api/plugins-door/file?path=${encodeURIComponent(filePath)}`)
+        if (!res.ok) throw new Error(`plugin door: HTTP ${res.status}`)
+        return res.json()
+      }
+      const res = await fetch(`/web-fs/read-text?path=${encodeURIComponent(filePath)}`)
+      if (!res.ok) throw new Error(`web-fs: HTTP ${res.status}`)
       return res.json()
     },
-    selectPaths: async () => [],
+    // Browsers cannot expose a real filesystem path from <input type="file">;
+    // the renderer's pickers therefore get virtual web-input:<n> paths backed
+    // by File objects, which readFileText/readFileDataUrl resolve above.
+    selectPaths: async (options) => pickWebFiles(options?.multiple !== false, options?.filters?.[0]?.extensions?.join(',')),
     writeClipboard: async (text) => {
       try {
         await navigator.clipboard.writeText(text)
@@ -310,7 +540,26 @@ export function installWebBridge(): void {
         return ''
       }
     },
-    saveImageFromUrl: async () => false,
+    saveImageFromUrl: async (url) => {
+      try {
+        // Web port: fetch the image and trigger a browser download. Returns
+        // true so the app's "saved" toast path fires like the native save.
+        const res = await fetch(url, { credentials: 'include' })
+        if (!res.ok) return false
+        const blob = await res.blob()
+        const objectUrl = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = objectUrl
+        a.download = imageFileNameFromUrl(url)
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000)
+        return true
+      } catch {
+        return false
+      }
+    },
     saveImageBuffer: async () => {
       throw new Error('unsupported-in-web')
     },
@@ -323,6 +572,9 @@ export function installWebBridge(): void {
     stopPreviewFileWatch: async () => true,
 
     openExternal: async (url) => {
+      window.open(url, '_blank', 'noopener')
+    },
+    openPreviewInBrowser: async (url) => {
       window.open(url, '_blank', 'noopener')
     },
     fetchLinkTitle: async (url) => {
@@ -345,10 +597,29 @@ export function installWebBridge(): void {
     getRecentLogs: async () => ({ path: '', lines: [] }),
 
     readDir: async (dir) => {
-      if (dir !== '/plugins') return { entries: [] }
-      const res = await fetch('/api/plugins-door/list')
+      if (dir === '/plugins') {
+        const res = await fetch('/api/plugins-door/list')
+        if (!res.ok) return { entries: [] }
+        return res.json()
+      }
+      const res = await fetch(`/web-fs/list?path=${encodeURIComponent(dir)}`)
       if (!res.ok) return { entries: [] }
       return res.json()
+    },
+    writeTextFile: async (filePath, content) => {
+      const res = await fetch('/web-fs/write-text', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: filePath, content }),
+      })
+      if (!res.ok) throw new Error(`web-fs: HTTP ${res.status}`)
+      return res.json()
+    },
+    gitRoot: async (filePath) => {
+      const res = await fetch(`/web-fs/git-root?path=${encodeURIComponent(filePath)}`)
+      if (!res.ok) return null
+      const json = await res.json()
+      return (json.root as string) ?? null
     },
     revealPath: async () => false,
     openDir: async () => ({ ok: false, error: 'unsupported-in-web' }),
@@ -395,18 +666,8 @@ export function installWebBridge(): void {
       searchMarketplace: async () => [],
     },
 
-    // --- terminal: unsupported in web -------------------------------------------------
-    terminal: {
-      cwd: async () => null,
-      dispose: async () => true,
-      onData: () => () => {},
-      onExit: () => () => {},
-      resize: async () => true,
-      start: async () => {
-        throw new Error('unsupported-in-web')
-      },
-      write: async () => false,
-    },
+    // --- terminal: real PTY over /web-term WS --------------------------------------
+    terminal: makeTerminal(),
   }
   window.hermesDesktop = bridge
 }

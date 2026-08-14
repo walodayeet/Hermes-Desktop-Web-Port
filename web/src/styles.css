@@ -12,6 +12,16 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Web port (iOS): Safari auto-zooms into any form field whose font-size is
+   below 16px on focus. The app's compact input styles (12–14px) trigger it
+   on iPhone. Floor the size at the form-field level only — conversation
+   text, titles, and chrome keep their design sizes. */
+input,
+textarea,
+select {
+  font-size: 16px;
+}
+
 /* Blanket reduced-motion override: kill ALL CSS animations and transitions
    when the user (or the E2E test harness via prefers-reduced-motion) requests
    it. Per-component @media rules below handle specific cases; this catches
@@ -142,6 +152,14 @@
 @layer base {
   :root {
     color-scheme: light;
+
+    /* Web port (iOS): account for the notch / home indicator / rounded
+       corners. Tailwind's pb-safe / pt-safe map to these env() values, and
+       the composer + topbar use them via the vars below. */
+    --safe-area-top: env(safe-area-inset-top, 0px);
+    --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-area-left: env(safe-area-inset-left, 0px);
+    --safe-area-right: env(safe-area-inset-right, 0px);
 
     --theme-foreground: #17171a;
     --theme-primary: #0053fd;
@@ -423,7 +441,7 @@
        This is the default; each chat surface re-declares the calc against its own measurement (see below). */
     --thread-last-message-clearance: calc(var(--composer-measured-height) + 2rem);
 
-    --composer-shell-pad-block-end: 0.625rem;
+    --composer-shell-pad-block-end: calc(0.625rem + var(--safe-area-bottom, 0px));
     --message-text-indent: 0.75rem;
     --conversation-text-font-size: 0.8125rem;
     --conversation-tool-font-size: 0.6875rem;

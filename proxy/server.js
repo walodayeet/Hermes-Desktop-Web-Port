@@ -17,6 +17,7 @@ const https = require('https');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 
 const PORT = Number(process.env.PORT) || 4000;
 const TARGET_RAW = process.env.HERMES_TARGET || '127.0.0.1:9119';
@@ -28,6 +29,14 @@ const DIST = path.resolve(__dirname, '..', 'web', 'dist');
 // Electron shell. In the web port that "disk" is THIS host's folder, exposed
 // as a virtual `/plugins` root. Override with HERMES_PLUGINS_DIR.
 const PLUGINS_DIR = process.env.HERMES_PLUGINS_DIR || path.join(os.homedir(), '.hermes', 'desktop-plugins');
+
+// Web-fs door: filesystem access for the desktop Files rail, rooted at
+// WEB_FS_ROOT (default the agent's home). Symlink-aware: every realpath must
+// stay inside the (real) root.
+const WEB_FS_ROOT = process.env.WEB_FS_ROOT || os.homedir();
+
+// Interactive terminal default cwd (the port's own checkout).
+const TERM_DEFAULT_CWD = process.env.HERMES_TERM_CWD || path.join(os.homedir(), 'G', 'work', 'Hermes-Desktop-Web');
 
 // ---------------------------------------------------------------------------
 // Target parsing
@@ -344,10 +353,428 @@ function servePluginsDoor(req, res) {
 }
 
 // ---------------------------------------------------------------------------
+// Web-fs door (web port) — filesystem access for the desktop Files rail
+// ---------------------------------------------------------------------------
+
+// Minimal extension→MIME map for data URLs (no deps).
+const DATA_URL_MIME = {
+  '.txt': 'text/plain',
+  '.md': 'text/markdown',
+  '.json': 'application/json',
+  '.js': 'text/javascript',
+  '.mjs': 'text/javascript',
+  '.cjs': 'text/javascript',
+  '.ts': 'text/typescript',
+  '.tsx': 'text/typescript',
+  '.jsx': 'text/javascript',
+  '.css': 'text/css',
+  '.html': 'text/html',
+  '.htm': 'text/html',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.pdf': 'application/pdf',
+  '.zip': 'application/zip',
+  '.gz': 'application/gzip',
+  '.wasm': 'application/wasm',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.mp4': 'video/mp4',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.csv': 'text/csv',
+  '.yaml': 'application/yaml',
+  '.yml': 'application/yaml',
+  '.xml': 'application/xml',
+};
+
+function dataUrlMime(filePath) {
+  return DATA_URL_MIME[path.extname(filePath).toLowerCase()] || 'application/octet-stream';
+}
+
+// Resolve a requested path under WEB_FS_ROOT, rejecting traversal lexically.
+function resolveWebFsPath(requestedPath) {
+  const root = path.resolve(WEB_FS_ROOT);
+  const target = path.resolve(root, requestedPath || '/');
+  if (target !== root && !target.startsWith(root + path.sep)) {
+    return null;
+  }
+  return { root, target };
+}
+
+// Symlink-aware containment: the realpath of `p` must stay inside the realpath
+// of the root. Returns the realpath, or null when missing/outside.
+function realpathWithinRoot(p) {
+  let rootReal;
+  let real;
+  try {
+    rootReal = fs.realpathSync(WEB_FS_ROOT);
+    real = fs.realpathSync(p);
+  } catch {
+    return null;
+  }
+  if (real !== rootReal && !real.startsWith(rootReal + path.sep)) {
+    return null;
+  }
+  return real;
+}
+
+function sendJson(res, status, obj) {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(obj));
+}
+
+function readJsonBody(req, cb) {
+  let body = '';
+  req.on('data', (chunk) => {
+    body += chunk;
+    if (body.length > 16 * 1024 * 1024) {
+      req.destroy();
+    }
+  });
+  req.on('end', () => {
+    try {
+      cb(null, body ? JSON.parse(body) : {});
+    } catch {
+      cb(new Error('bad_json'), null);
+    }
+  });
+  req.on('error', () => cb(new Error('read_error'), null));
+}
+
+function serveWebFs(req, res) {
+  const u = new URL(req.url, 'http://localhost');
+  const q = u.searchParams.get('path') || '';
+
+  if (u.pathname === '/web-fs/list' && req.method === 'GET') {
+    const r = resolveWebFsPath(q);
+    if (!r) return sendJson(res, 400, { error: 'bad_path', detail: 'outside web-fs root' });
+    const real = realpathWithinRoot(r.target);
+    if (!real) return sendJson(res, 404, { error: 'not_found' });
+    let dirents;
+    try {
+      dirents = fs.readdirSync(real, { withFileTypes: true });
+    } catch {
+      return sendJson(res, 404, { error: 'not_found' });
+    }
+    const entries = dirents
+      .filter((d) => d.isDirectory() || d.isFile() || d.isSymbolicLink())
+      .map((d) => ({ name: d.name, path: path.join(r.target, d.name), isDirectory: d.isDirectory() }));
+    return sendJson(res, 200, { entries });
+  }
+
+  if (u.pathname === '/web-fs/read-text' && req.method === 'GET') {
+    const r = resolveWebFsPath(q);
+    if (!r) return sendJson(res, 400, { error: 'bad_path' });
+    const real = realpathWithinRoot(r.target);
+    if (!real) return sendJson(res, 404, { error: 'not_found' });
+    fs.readFile(real, (err, data) => {
+      if (err) return sendJson(res, 404, { error: 'not_found' });
+      sendJson(res, 200, { path: r.target, text: data.toString('utf8') });
+    });
+    return;
+  }
+
+  if (u.pathname === '/web-fs/read-data-url' && req.method === 'GET') {
+    const r = resolveWebFsPath(q);
+    if (!r) return sendJson(res, 400, { error: 'bad_path' });
+    const real = realpathWithinRoot(r.target);
+    if (!real) return sendJson(res, 404, { error: 'not_found' });
+    fs.readFile(real, (err, data) => {
+      if (err) return sendJson(res, 404, { error: 'not_found' });
+      sendJson(res, 200, { dataUrl: `data:${dataUrlMime(real)};base64,${data.toString('base64')}` });
+    });
+    return;
+  }
+
+  if (u.pathname === '/web-fs/write-text' && req.method === 'POST') {
+    readJsonBody(req, (err, body) => {
+      if (err) return sendJson(res, 400, { error: 'bad_body' });
+      if (typeof body.path !== 'string' || typeof body.content !== 'string') {
+        return sendJson(res, 400, { error: 'bad_body', detail: 'expected {path, content}' });
+      }
+      const r = resolveWebFsPath(body.path);
+      if (!r) return sendJson(res, 400, { error: 'bad_path' });
+      const parentReal = realpathWithinRoot(path.dirname(r.target));
+      if (!parentReal) return sendJson(res, 400, { error: 'bad_path', detail: 'parent dir missing or outside root' });
+      // Existing target (incl. dangling symlink) must not resolve outside the
+      // root — otherwise writeFile would follow it and clobber a file there.
+      try {
+        fs.lstatSync(r.target);
+        if (!realpathWithinRoot(r.target)) {
+          return sendJson(res, 400, { error: 'bad_path', detail: 'target resolves outside web-fs root' });
+        }
+      } catch {
+        // Nonexistent → brand-new file under the already-verified parent.
+      }
+      fs.writeFile(r.target, body.content, 'utf8', (werr) => {
+        if (werr) return sendJson(res, 500, { error: 'write_failed', detail: werr.message });
+        sendJson(res, 200, { path: r.target });
+      });
+    });
+    return;
+  }
+
+  if (u.pathname === '/web-fs/git-root' && req.method === 'GET') {
+    const r = resolveWebFsPath(q);
+    if (!r) return sendJson(res, 400, { error: 'bad_path' });
+    let dir = realpathWithinRoot(r.target);
+    if (!dir) {
+      // Non-existent path (e.g. an unsaved new file): walk up from its parent.
+      const pr = resolveWebFsPath(path.dirname(q) || '/');
+      dir = pr ? realpathWithinRoot(pr.target) : null;
+    }
+    if (!dir) return sendJson(res, 200, { root: null });
+    let cur = dir;
+    for (;;) {
+      if (fs.existsSync(path.join(cur, '.git'))) return sendJson(res, 200, { root: cur });
+      const next = path.dirname(cur);
+      if (next === cur || !realpathWithinRoot(next)) break;
+      cur = next;
+    }
+    return sendJson(res, 200, { root: null });
+  }
+
+  sendJson(res, 404, { error: 'not_found' });
+}
+
+// ---------------------------------------------------------------------------
+// Interactive terminal (web port) — real PTY via node-pty over WS /web-term
+// ---------------------------------------------------------------------------
+
+const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+
+// Minimal RFC6455 server-side connection: text frames in/out, ping→pong, and a
+// close handshake. Enough for a terminal; no external `ws` dependency.
+class WsConn {
+  constructor(socket) {
+    this.socket = socket;
+    this.buf = Buffer.alloc(0);
+    this.fragOpcode = 0;
+    this.fragments = [];
+    this.closed = false;
+    this.closeEmitted = false;
+    this.onMessage = null;
+    this.onClose = null;
+    socket.on('data', (chunk) => this._feed(chunk));
+    socket.on('error', () => {});
+    socket.on('close', () => this._notifyClose());
+  }
+
+  _feed(chunk) {
+    this.buf = this.buf.length ? Buffer.concat([this.buf, chunk]) : chunk;
+    while (this._parseFrame()) {
+      /* consume frames until one is incomplete */
+    }
+  }
+
+  _parseFrame() {
+    const buf = this.buf;
+    if (buf.length < 2) return false;
+    const b0 = buf[0];
+    const b1 = buf[1];
+    const fin = (b0 & 0x80) !== 0;
+    const opcode = b0 & 0x0f;
+    const masked = (b1 & 0x80) !== 0;
+    let len = b1 & 0x7f;
+    let offset = 2;
+    if (len === 126) {
+      if (buf.length < 4) return false;
+      len = buf.readUInt16BE(2);
+      offset = 4;
+    } else if (len === 127) {
+      if (buf.length < 10) return false;
+      const big = buf.readBigUInt64BE(2);
+      if (big > BigInt(Number.MAX_SAFE_INTEGER)) {
+        this._notifyClose();
+        try { this.socket.destroy(); } catch {}
+        return false;
+      }
+      len = Number(big);
+      offset = 10;
+    }
+    let maskKey = null;
+    if (masked) {
+      if (buf.length < offset + 4) return false;
+      maskKey = buf.slice(offset, offset + 4);
+      offset += 4;
+    }
+    if (buf.length < offset + len) return false;
+    const payload = buf.slice(offset, offset + len);
+    this.buf = buf.slice(offset + len);
+    if (maskKey) {
+      for (let i = 0; i < payload.length; i++) payload[i] ^= maskKey[i & 3];
+    }
+    this._dispatch(opcode, fin, payload);
+    return true;
+  }
+
+  _dispatch(opcode, fin, payload) {
+    if (opcode === 0x8) {
+      this._sendFrame(0x8, payload.slice(0, 125));
+      this._notifyClose();
+      try { this.socket.destroy(); } catch {}
+      return;
+    }
+    if (opcode === 0x9) {
+      this._sendFrame(0xa, payload);
+      return;
+    }
+    if (opcode === 0xa) return;
+    if (opcode === 0x1 || opcode === 0x0) {
+      if (opcode === 0x1) {
+        this.fragOpcode = 0x1;
+        this.fragments = [];
+      }
+      if (this.fragOpcode !== 0x1) return;
+      this.fragments.push(payload);
+      if (fin) {
+        const text = Buffer.concat(this.fragments).toString('utf8');
+        this.fragments = [];
+        this.fragOpcode = 0;
+        if (this.onMessage) this.onMessage(text);
+      }
+    }
+  }
+
+  sendText(str) {
+    if (this.closed) return;
+    this._sendFrame(0x1, Buffer.from(str, 'utf8'));
+  }
+
+  _sendFrame(opcode, payload) {
+    const len = payload.length;
+    let header;
+    if (len < 126) {
+      header = Buffer.from([0x80 | opcode, len]);
+    } else if (len < 65536) {
+      header = Buffer.alloc(4);
+      header[0] = 0x80 | opcode;
+      header[1] = 126;
+      header.writeUInt16BE(len, 2);
+    } else {
+      header = Buffer.alloc(10);
+      header[0] = 0x80 | opcode;
+      header[1] = 127;
+      header.writeBigUInt64BE(BigInt(len), 2);
+    }
+    try {
+      this.socket.write(Buffer.concat([header, payload]));
+    } catch {}
+  }
+
+  _notifyClose() {
+    if (this.closeEmitted) return;
+    this.closeEmitted = true;
+    this.closed = true;
+    if (this.onClose) this.onClose();
+  }
+
+  close() {
+    if (this.closed) return;
+    this._sendFrame(0x8, Buffer.alloc(0));
+    this._notifyClose();
+    try { this.socket.destroy(); } catch {}
+  }
+}
+
+function handleTermUpgrade(req, socket, head) {
+  const key = req.headers['sec-websocket-key'];
+  if (!key) {
+    socket.write('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+  const accept = crypto.createHash('sha1').update(key + WS_GUID).digest('base64');
+  socket.write(
+    'HTTP/1.1 101 Switching Protocols\r\n' +
+      'Upgrade: websocket\r\n' +
+      'Connection: Upgrade\r\n' +
+      `Sec-WebSocket-Accept: ${accept}\r\n\r\n`
+  );
+
+  const ws = new WsConn(socket);
+  if (head && head.length) ws._feed(head);
+
+  let ptyMod;
+  try {
+    ptyMod = require('node-pty');
+  } catch {
+    ws.sendText(JSON.stringify({ type: 'exit', code: 1, signal: null }));
+    ws.close();
+    return;
+  }
+
+  const u = new URL(req.url, 'http://localhost');
+  const shell = process.env.SHELL || '/bin/bash';
+  const cwdRaw = u.searchParams.get('cwd') || TERM_DEFAULT_CWD;
+  const cols = Math.max(2, Math.floor(Number(u.searchParams.get('cols'))) || 80);
+  const rows = Math.max(1, Math.floor(Number(u.searchParams.get('rows'))) || 24);
+
+  let cwd = cwdRaw;
+  try {
+    if (!fs.statSync(cwd).isDirectory()) cwd = TERM_DEFAULT_CWD;
+  } catch {
+    cwd = TERM_DEFAULT_CWD;
+  }
+
+  let term;
+  try {
+    term = ptyMod.spawn(shell, [], {
+      name: 'xterm-256color',
+      cols,
+      rows,
+      cwd,
+      env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
+    });
+  } catch {
+    ws.sendText(JSON.stringify({ type: 'exit', code: 1, signal: null }));
+    ws.close();
+    return;
+  }
+
+  ws.onMessage = (text) => {
+    let msg;
+    try {
+      msg = JSON.parse(text);
+    } catch {
+      return;
+    }
+    if (msg.type === 'input' && typeof msg.data === 'string') {
+      term.write(msg.data);
+    } else if (msg.type === 'resize' && typeof msg.cols === 'number' && typeof msg.rows === 'number') {
+      try {
+        term.resize(Math.max(2, Math.floor(msg.cols)), Math.max(1, Math.floor(msg.rows)));
+      } catch {}
+    }
+  };
+
+  ws.onClose = () => {
+    try { term.kill(); } catch {}
+  };
+
+  term.onData((data) => ws.sendText(JSON.stringify({ type: 'output', data })));
+  term.onExit(({ exitCode, signal }) => {
+    ws.sendText(JSON.stringify({ type: 'exit', code: exitCode, signal: signal ?? null }));
+    ws.close();
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
 
 const server = http.createServer((req, res) => {
+  // Web-fs door: filesystem for the desktop Files rail (local, same-origin).
+  if (req.url.startsWith('/web-fs/')) {
+    serveWebFs(req, res);
+    return;
+  }
   // The plugins door is served BY the proxy (it is the web port's "local
   // disk") — must be intercepted before the generic /api/* forward.
   if (req.url.startsWith('/api/plugins-door/')) {
@@ -364,6 +791,12 @@ const server = http.createServer((req, res) => {
 });
 
 server.on('upgrade', (req, socket, head) => {
+  const pathname = new URL(req.url, 'http://localhost').pathname;
+  // Interactive terminal: terminate locally (real PTY), never forwarded.
+  if (pathname === '/web-term') {
+    handleTermUpgrade(req, socket, head);
+    return;
+  }
   if (!req.url.startsWith('/api/ws')) {
     socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
     socket.destroy();

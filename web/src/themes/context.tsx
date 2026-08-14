@@ -194,6 +194,13 @@ function applyTheme(theme: DesktopTheme, mode: 'light' | 'dark') {
   root.dataset.hermesMode = rendered
   root.classList.toggle('dark', isDark)
 
+  // Web port: keep the browser chrome (mobile status bar / URL bar) tinted to
+  // the active Hermes background so iOS doesn't show a stale fixed color.
+  const metaTheme = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')
+  if (metaTheme) {
+    metaTheme.content = c.background
+  }
+
   // Brand seeds feed every glass + shadcn token via `color-mix()` in styles.css.
   const seeds: Record<string, string> = {
     '--theme-foreground': c.foreground,

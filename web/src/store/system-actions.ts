@@ -41,6 +41,14 @@ export async function runGatewayRestart(): Promise<void> {
   try {
     await awaitAction(await restartGateway())
   } catch (err) {
+    // Web port: the backend RPC may be unavailable (e.g. served read-only or
+    // the gateway doesn't expose the action). Falling back to a page reload
+    // still gives the user a working "restart the UI" affordance — the app
+    // re-boots, re-mints a WS ticket, and reconnects to the same backend.
+    if (window.location.protocol.startsWith('http')) {
+      window.location.reload()
+      return
+    }
     notifyError(err, translateNow('commandCenter.gatewayRestartFailed'))
   } finally {
     $gatewayRestarting.set(false)
