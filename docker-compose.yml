@@ -20,6 +20,7 @@ services:
       - HERMES_TERM_CWD=${HERMES_TERM_CWD:-/workspace}
       # Desktop-plugins door. Mount a directory of plugins (each
       # <name>/plugin.js) if you use the plugin runtime; empty otherwise.
+      # Host path comes from HERMES_PLUGINS_SRC (default: repo-local ./plugins).
       - HERMES_PLUGINS_DIR=${HERMES_PLUGINS_DIR:-/plugins}
     extra_hosts:
       # Linux: maps host.docker.internal → host's gateway IP. Docker Desktop
@@ -27,8 +28,11 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - workspace:/workspace
-      # Optional: expose a plugins dir. Create ./plugins/<name>/plugin.js to use.
-      # - ./plugins:/plugins:ro
+      # Plugins door host path. Point HERMES_PLUGINS_SRC at a real plugins dir
+      # (e.g. HERMES_PLUGINS_SRC=$HOME/.hermes/desktop-plugins) or drop
+      # plugin folders under ./plugins. Read-only so the container cannot
+      # modify your plugin sources.
+      - ${HERMES_PLUGINS_SRC:-./plugins}:/plugins:ro
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||4000)+'/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
