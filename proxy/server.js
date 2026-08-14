@@ -15,12 +15,19 @@
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const PORT = Number(process.env.PORT) || 4000;
 const TARGET_RAW = process.env.HERMES_TARGET || '127.0.0.1:9119';
 
 const DIST = path.resolve(__dirname, '..', 'web', 'dist');
+
+// Desktop-plugins door: the renderer's runtime plugin loader reads
+// `<hermes home>/desktop-plugins/<name>/plugin.js` off local disk in the
+// Electron shell. In the web port that "disk" is THIS host's folder, exposed
+// as a virtual `/plugins` root. Override with HERMES_PLUGINS_DIR.
+const PLUGINS_DIR = process.env.HERMES_PLUGINS_DIR || path.join(os.homedir(), '.hermes', 'desktop-plugins');
 
 // ---------------------------------------------------------------------------
 // Target parsing
@@ -274,10 +281,79 @@ function serveStatic(req, res) {
 }
 
 // ---------------------------------------------------------------------------
+// Desktop-plugins door (web port)
+// ---------------------------------------------------------------------------
+
+// GET /api/plugins-door/list → { entries: [{name, path, isDirectory}] }
+// Only folders containing a plugin.js are listed (the renderer loader probes
+// readFileText and skips 404s, but pre-filtering keeps the door honest).
+// GET /api/plugins-door/file?path=/plugins/<name>/plugin.js → { path, text }
+// Path is strictly validated: no traversal, single segment, exact filename.
+function servePluginsDoor(req, res) {
+  const send = (status, obj) => {
+    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify(obj));
+  };
+
+  let u;
+  try {
+    u = new URL(req.url, 'http://localhost');
+  } catch {
+    send(400, { error: 'bad_request' });
+    return;
+  }
+
+  if (u.pathname === '/api/plugins-door/list') {
+    let dirents = [];
+    try {
+      dirents = fs.readdirSync(PLUGINS_DIR, { withFileTypes: true });
+    } catch {
+      // No door yet — empty listing; the renderer's poll picks it up later.
+    }
+    const entries = dirents
+      .filter((d) => d.isDirectory() && fs.existsSync(path.join(PLUGINS_DIR, d.name, 'plugin.js')))
+      .map((d) => ({ name: d.name, path: `/plugins/${d.name}`, isDirectory: true }));
+    send(200, { entries });
+    return;
+  }
+
+  if (u.pathname === '/api/plugins-door/file') {
+    const virt = u.searchParams.get('path') || '';
+    const m = /^\/plugins\/([^/]+)\/plugin\.js$/.exec(virt);
+    if (!m) {
+      send(400, { error: 'bad_path', detail: 'expected /plugins/<name>/plugin.js' });
+      return;
+    }
+    const rootResolved = path.resolve(PLUGINS_DIR);
+    const fileResolved = path.resolve(rootResolved, m[1], 'plugin.js');
+    if (!fileResolved.startsWith(rootResolved + path.sep)) {
+      send(400, { error: 'bad_path', detail: 'outside plugins root' });
+      return;
+    }
+    fs.readFile(fileResolved, (err, data) => {
+      if (err) {
+        send(404, { error: 'not_found' });
+        return;
+      }
+      send(200, { path: virt, text: data.toString('utf8') });
+    });
+    return;
+  }
+
+  send(404, { error: 'not_found' });
+}
+
+// ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
 
 const server = http.createServer((req, res) => {
+  // The plugins door is served BY the proxy (it is the web port's "local
+  // disk") — must be intercepted before the generic /api/* forward.
+  if (req.url.startsWith('/api/plugins-door/')) {
+    servePluginsDoor(req, res);
+    return;
+  }
   // /api/* AND /auth/* — v0.20.0 routes login/logout under /auth/, and the
   // whole point is same-origin cookie passthrough. Everything else is static.
   if (req.url.startsWith('/api/') || req.url.startsWith('/auth/')) {

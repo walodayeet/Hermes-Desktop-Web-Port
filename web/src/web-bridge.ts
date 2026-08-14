@@ -283,7 +283,17 @@ export function installWebBridge(): void {
     readFileDataUrl: async () => {
       throw new Error('unsupported-in-web')
     },
-    readFileText: async () => ({ path: '', text: '' }),
+    // Desktop-plugins door: the runtime loader reads `<hermes home>/desktop-plugins/<name>/plugin.js`
+    // off local disk in Electron. In the web port that disk is the proxy host's folder,
+    // exposed as a virtual `/plugins` root via /api/plugins-door/*. Only that root is
+    // served — everything else keeps the old empty result.
+    desktopPluginsRoot: async () => '/plugins',
+    readFileText: async (path) => {
+      if (!path?.startsWith('/plugins/')) return { path: '', text: '' }
+      const res = await fetch(`/api/plugins-door/file?path=${encodeURIComponent(path)}`)
+      if (!res.ok) throw new Error(`plugin door: HTTP ${res.status}`)
+      return res.json()
+    },
     selectPaths: async () => [],
     writeClipboard: async (text) => {
       try {
@@ -334,7 +344,12 @@ export function installWebBridge(): void {
     revealLogs: async () => ({ ok: false, path: '', error: 'unsupported-in-web' }),
     getRecentLogs: async () => ({ path: '', lines: [] }),
 
-    readDir: async () => ({ entries: [] }),
+    readDir: async (dir) => {
+      if (dir !== '/plugins') return { entries: [] }
+      const res = await fetch('/api/plugins-door/list')
+      if (!res.ok) return { entries: [] }
+      return res.json()
+    },
     revealPath: async () => false,
     openDir: async () => ({ ok: false, error: 'unsupported-in-web' }),
 

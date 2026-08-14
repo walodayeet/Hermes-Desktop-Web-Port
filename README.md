@@ -28,6 +28,23 @@ renderer byte-for-byte and supplies the bridge from the browser:
   so the gate checks the session cookie (`GET /api/auth/me`) and renders a
   minimal sign-in form (`POST /auth/password-login`) before the app boots.
 
+## Desktop plugins in the web port
+
+The Electron shell loads plugins from `<hermes home>/desktop-plugins/<name>/plugin.js`
+off local disk (fs-watched, hot-reloaded). The web port has no Electron fs, so
+the **proxy serves that folder** as a virtual `/plugins` root:
+
+- `GET /api/plugins-door/list` → `{entries:[{name,path,isDirectory}]}` (dirs with a plugin.js)
+- `GET /api/plugins-door/file?path=/plugins/<name>/plugin.js` → `{path,text}` (strictly validated)
+
+The runtime plugin loader (unchanged, browser-native: blob import + SDK
+specifier rewrite) talks to it through the web bridge
+(`desktopPluginsRoot`/`readDir`/`readFileText`), and its 5-second poll
+replaces fs-watching: drop a folder into `~/.hermes/desktop-plugins/` on the
+proxy host → plugin appears in ~5s; remove it → unloads. Plugins with a
+backend (e.g. file-ops) reach it via the normal `/api/plugins/*` forward.
+Override the folder with `HERMES_PLUGINS_DIR`.
+
 The renderer source is copied from `apps/desktop/src` + `apps/shared/src`.
 When the upstream desktop app changes, re-copy those trees; the bridge and
 gate live in `web/src/web-bridge.ts` + `web/src/login-gate.ts` and are the
