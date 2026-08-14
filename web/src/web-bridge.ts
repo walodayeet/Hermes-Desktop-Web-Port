@@ -14,6 +14,7 @@
  */
 
 import { buildHermesWebSocketUrl } from '@hermes/shared'
+import type { DesktopMarketplaceSearchItem, DesktopMarketplaceThemeResult } from '@/global'
 
 // ── config ──────────────────────────────────────────────────────────────────
 // Same-origin by default (served through the proxy). Override with
@@ -825,10 +826,27 @@ export function installWebBridge(): void {
       },
     },
     themes: {
-      fetchMarketplace: async () => {
-        throw new Error('unsupported-in-web')
+      fetchMarketplace: async (id: string) => {
+        const res = await fetch(`/api/marketplace/fetch?id=${encodeURIComponent(id)}`, {
+          credentials: 'include',
+        })
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}))
+          throw new Error(body?.detail || `marketplace fetch failed (HTTP ${res.status})`)
+        }
+        return (await res.json()) as DesktopMarketplaceThemeResult
       },
-      searchMarketplace: async () => [],
+      searchMarketplace: async (query: string) => {
+        const res = await fetch(`/api/marketplace/search?q=${encodeURIComponent(query || '')}&limit=20`, {
+          credentials: 'include',
+        })
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}))
+          throw new Error(body?.detail || `marketplace search failed (HTTP ${res.status})`)
+        }
+        const data = (await res.json()) as { items: DesktopMarketplaceSearchItem[] }
+        return data.items ?? []
+      },
     },
 
     // --- terminal: real PTY over /web-term WS --------------------------------------

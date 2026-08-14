@@ -22,17 +22,26 @@ services:
       # <name>/plugin.js) if you use the plugin runtime; empty otherwise.
       # Host path comes from HERMES_PLUGINS_SRC (default: repo-local ./plugins).
       - HERMES_PLUGINS_DIR=${HERMES_PLUGINS_DIR:-/plugins}
+      # Server-side settings store (theme/plugin prefs sync across devices).
+      - HERMES_WEB_SETTINGS_FILE=/data/settings.json
     extra_hosts:
       # Linux: maps host.docker.internal → host's gateway IP. Docker Desktop
       # provides it natively; the entry is a no-op there.
       - "host.docker.internal:host-gateway"
     volumes:
-      - workspace:/workspace
+      # Files door root. On a bare host the proxy defaults to the agent's home;
+      # in docker WEB_FS_ROOT is /workspace, so bind the directory you actually
+      # want to browse. NOTE: the container can read AND write here (the
+      # terminal + file uploads target it), so never point this at / or a
+      # credential-bearing tree on an untrusted network.
+      - ${WEB_FS_SRC:-./workspace}:/workspace
       # Plugins door host path. Point HERMES_PLUGINS_SRC at a real plugins dir
       # (e.g. HERMES_PLUGINS_SRC=$HOME/.hermes/desktop-plugins) or drop
       # plugin folders under ./plugins. Read-only so the container cannot
       # modify your plugin sources.
       - ${HERMES_PLUGINS_SRC:-./plugins}:/plugins:ro
+      # Server-side settings store (survives container recreation).
+      - web-settings:/data
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||4000)+'/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
@@ -41,4 +50,5 @@ services:
       retries: 3
 
 volumes:
-  workspace:
+  # Server-side settings store (theme/plugin prefs, survives recreation).
+  web-settings:

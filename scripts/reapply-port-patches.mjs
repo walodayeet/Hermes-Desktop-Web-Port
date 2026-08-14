@@ -65,21 +65,58 @@ import { runLoginGate } from './login-gate'
 
 import App from './app'`,
 )
+
+// main.tsx: server-settings import (web-port only; upstream has no such file).
 patchFile(
   'main.tsx',
-  'void runLoginGate().then(() => {',
-  'createRoot(document.getElementById(\'root\')!).render(',
-  `void runLoginGate().then(() => {
-    createRoot(document.getElementById('root')!).render(`,
+  "import { hydrateServerSettings, initServerSettingsSync } from './lib/server-settings'",
+  "import { installClipboardShim } from './lib/clipboard'",
+  `import { installClipboardShim } from './lib/clipboard'
+import { hydrateServerSettings, initServerSettingsSync } from './lib/server-settings'`,
 )
-patchFile(
-  'main.tsx',
-  '    )\n  })',
-  '    </StrictMode>\n  )',
-  `    </StrictMode>
-    )
-  })`,
-)
+
+// main.tsx: boot chain — login gate → hydrate server settings → render, and
+// start mirroring durable pref writes. This REPLACES the whole `} else {`
+// tail (which upstream ships as a bare `createRoot(...).render(...)` and old
+// patches wrapped in `void runLoginGate().then(() => { ... })`), so it
+// converges from fresh, old-patched, and current trees alike.
+{
+  const file = path.join(webSrc, 'main.tsx')
+  if (!fs.existsSync(file)) {
+    console.warn('  ! main.tsx missing, skipping boot chain')
+  } else {
+    let src = fs.readFileSync(file, 'utf8')
+    // Marker is the boot-chain call itself — the import line alone must not
+    // short-circuit the patch.
+    if (src.includes('.then(() => hydrateServerSettings())')) {
+      console.log('  = main.tsx boot chain already patched')
+    } else {
+      const re = /} else \{\n([\s\S]*?)\n\}/m
+      const m = src.match(re)
+      if (!m) {
+        console.warn('  ! main.tsx: boot tail anchor not found, skipping')
+      } else {
+        const inner = m[1]
+        src = src.replace(
+          re,
+          `} else {
+  void runLoginGate()
+    .then(() => hydrateServerSettings())
+    .then(() => {
+      // Mirror durable pref writes (theme/plugins) to the server store so they
+      // follow the user across devices.
+      initServerSettingsSync()
+${inner}
+    })
+}`,
+        )
+        fs.writeFileSync(file, src)
+        touched++
+        console.log('  + main.tsx boot chain patched')
+      }
+    }
+  }
+}
 
 // --- styles.css: iOS input floor -------------------------------------------------
 patchFile(

@@ -39,6 +39,13 @@ const WEB_FS_ROOT = process.env.WEB_FS_ROOT || os.homedir();
 // (WEB_FS_ROOT); on a bare host, the agent's home.
 const TERM_DEFAULT_CWD = process.env.HERMES_TERM_CWD || os.homedir();
 
+// Server-side settings store: the renderer mirrors durable UI preferences
+// (theme, mode, plugin decisions, user themes) here so they follow the user
+// across devices instead of living in per-browser localStorage. A JSON file on
+// the server; override path (docker should point at a mounted volume).
+const SETTINGS_FILE = process.env.HERMES_WEB_SETTINGS_FILE ||
+  path.join(os.homedir(), '.hermes', 'hermes-desktop-web-settings.json');
+
 // ---------------------------------------------------------------------------
 // Target parsing
 // ---------------------------------------------------------------------------
@@ -767,6 +774,111 @@ function handleTermUpgrade(req, socket, head) {
 }
 
 // ---------------------------------------------------------------------------
+// Server-side settings store
+// ---------------------------------------------------------------------------
+// Durable UI preferences (theme, mode, plugin decisions, user themes) that the
+// renderer mirrors so they follow the user across devices. Shape: a flat JSON
+// object of localStorage key → string value, exactly as the renderer stores
+// them. GET returns the whole store; PUT merges the incoming object.
+
+function readSettingsStore() {
+  try {
+    return JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function serveSettings(req, res) {
+  if (req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify(readSettingsStore()));
+    return;
+  }
+
+  if (req.method === 'PUT') {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      let incoming = {};
+      try {
+        incoming = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'invalid_json' }));
+        return;
+      }
+      if (typeof incoming !== 'object' || incoming === null || Array.isArray(incoming)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'expected_object' }));
+        return;
+      }
+      // Value whitelist: only plain strings are accepted (localStorage values).
+      const merged = { ...readSettingsStore() };
+      for (const [k, v] of Object.entries(incoming)) {
+        if (typeof v === 'string' && k.length < 256 && v.length < 4 * 1024 * 1024) {
+          merged[k] = v;
+        }
+      }
+      try {
+        fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
+        fs.writeFileSync(SETTINGS_FILE, JSON.stringify(merged, null, 2));
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(merged));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'write_failed', detail: String(err.message || err) }));
+      }
+    });
+    return;
+  }
+
+  res.writeHead(405, { 'Content-Type': 'application/json', Allow: 'GET, PUT' });
+  res.end(JSON.stringify({ error: 'method_not_allowed' }));
+}
+
+// ---------------------------------------------------------------------------
+// VS Code Marketplace door
+// ---------------------------------------------------------------------------
+// The renderer's theme marketplace used to be Electron-main-only
+// (window.hermesDesktop.themes); in the web port the proxy performs the
+// HTTPS calls (gallery search + .vsix download/zip extract) so the browser
+// never hits CORS or size limits. Endpoints:
+//   GET /api/marketplace/search?q=<query>&limit=<n>
+//   GET /api/marketplace/fetch?id=<publisher.extension>
+
+const marketplace = require('./marketplace');
+
+function serveMarketplace(req, res) {
+  const u = new URL(req.url, 'http://localhost');
+  const respond = (status, body) => {
+    res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify(body));
+  };
+
+  if (u.pathname.endsWith('/search')) {
+    const q = u.searchParams.get('q') || '';
+    const limit = Number(u.searchParams.get('limit')) || 20;
+    marketplace
+      .searchMarketplaceThemes(q, limit)
+      .then((items) => respond(200, { items }))
+      .catch((err) => respond(502, { error: 'marketplace_search_failed', detail: String(err.message || err) }));
+    return;
+  }
+
+  if (u.pathname.endsWith('/fetch')) {
+    const id = u.searchParams.get('id') || '';
+    marketplace
+      .fetchMarketplaceThemes(id)
+      .then((result) => respond(200, result))
+      .catch((err) => respond(502, { error: 'marketplace_fetch_failed', detail: String(err.message || err) }));
+    return;
+  }
+
+  respond(404, { error: 'not_found' });
+}
+
+// ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
 
@@ -774,6 +886,18 @@ const server = http.createServer((req, res) => {
   // Web-fs door: filesystem for the desktop Files rail (local, same-origin).
   if (req.url.startsWith('/web-fs/')) {
     serveWebFs(req, res);
+    return;
+  }
+  // Server-side settings store (theme/plugin prefs follow the user across
+  // devices) — local, not forwarded.
+  if (req.url.startsWith('/web-settings')) {
+    serveSettings(req, res);
+    return;
+  }
+  // VS Code Marketplace door — served BY the proxy (browser-safe HTTPS), not
+  // forwarded. Must come before the generic /api/* forward.
+  if (req.url.startsWith('/api/marketplace/')) {
+    serveMarketplace(req, res);
     return;
   }
   // The plugins door is served BY the proxy (it is the web port's "local

@@ -23,7 +23,7 @@ if [ ! -d "$UPSTREAM/apps/desktop/src" ]; then
   exit 1
 fi
 
-rsync -a --delete --exclude=web-bridge.ts --exclude=login-gate.ts "$UPSTREAM/apps/desktop/src/" web/src/
+rsync -a --delete --exclude=web-bridge.ts --exclude=login-gate.ts --exclude=server-settings.ts "$UPSTREAM/apps/desktop/src/" web/src/
 rsync -a --delete "$UPSTREAM/apps/shared/src/" shared/src/
 find shared/src web/src -name '*.test.*' -delete
 node scripts/reapply-port-patches.mjs web/src
