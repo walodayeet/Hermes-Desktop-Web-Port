@@ -1,9 +1,12 @@
-# Hermes Desktop Web
+# Hermes Desktop Web (unofficial)
 
 A **web port of the Hermes Electron desktop app** (`hermes-agent/apps/desktop`),
 not a reimplementation. The renderer — the real desktop UI (chat, sessions,
 profiles, command center, settings, plugins) — is copied verbatim and runs in
 the browser; only the Electron shell is replaced by a web bridge.
+
+> **Unofficial community project.** Not affiliated with or endorsed by Nous
+> Research. See [NOTICE.md](NOTICE.md).
 
 > **Self-host your Hermes agent and talk to it from any browser or phone.**
 > The agent stays on your server; this is the UI layer in front of it.
