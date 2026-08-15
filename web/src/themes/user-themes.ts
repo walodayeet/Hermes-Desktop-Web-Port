@@ -81,6 +81,11 @@ function persist(record: Record<string, DesktopTheme>) {
   // Route through the persistence choke point (writeKey) so the server-settings
   // sync sees the write and mirrors installed themes across devices.
   writeKey(USER_THEMES_KEY, JSON.stringify(record))
+  try {
+    window.localStorage.setItem(USER_THEMES_KEY, JSON.stringify(record))
+  } catch {
+    // Best-effort: a restricted storage context shouldn't break theming.
+  }
 }
 
 /** Reactive map of installed user themes, keyed by slug. */

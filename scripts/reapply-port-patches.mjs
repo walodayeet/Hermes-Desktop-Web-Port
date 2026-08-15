@@ -382,6 +382,78 @@ patchFile(
       fileNameForPath?: (filePath: string) => string | null`,
 )
 
+// --- themes/user-themes.ts + contrib/plugins-store.ts: server-settings sync choke point ------
+// The server-settings sync observes writes that flow through lib/storage.ts's
+// writeKey. Upstream persists themes + plugin decisions with raw
+// window.localStorage.setItem, which the sync never sees → installed themes
+// and plugin toggles stay per-browser. Patch them to write via writeKey, and
+// export refresh fns so hydrated values reach the atoms on first paint.
+patchFile(
+  'themes/user-themes.ts',
+  "import { writeKey } from '@/lib/storage'",
+  "import { atom, computed } from 'nanostores'",
+  `import { atom, computed } from 'nanostores'
+
+import { writeKey } from '@/lib/storage'`,
+)
+patchFile(
+  'themes/user-themes.ts',
+  '// Route through the persistence choke point (writeKey) so the server-settings',
+  'function persist(record: Record<string, DesktopTheme>) {',
+  `function persist(record: Record<string, DesktopTheme>) {
+  // Route through the persistence choke point (writeKey) so the server-settings
+  // sync sees the write and mirrors installed themes across devices.
+  writeKey(USER_THEMES_KEY, JSON.stringify(record))`,
+)
+patchFile(
+  'themes/user-themes.ts',
+  'export function refreshUserThemes(): void {',
+  'export const $userThemes = atom<Record<string, DesktopTheme>>(typeof window === \'undefined\' ? {} : readStored())',
+  `export const $userThemes = atom<Record<string, DesktopTheme>>(typeof window === 'undefined' ? {} : readStored())
+
+/**
+ * Re-read user themes from localStorage into the atom. Needed after
+ * server-settings hydration writes themes on a fresh browser (the atom
+ * initializes at module scope, before hydration runs).
+ */
+export function refreshUserThemes(): void {
+  if (typeof window === 'undefined') return
+  $userThemes.set(readStored())
+}`,
+)
+patchFile(
+  'contrib/plugins-store.ts',
+  "import { writeKey } from '@/lib/storage'",
+  "import { atom } from 'nanostores'",
+  `import { atom } from 'nanostores'
+
+import { writeKey } from '@/lib/storage'`,
+)
+patchFile(
+  'contrib/plugins-store.ts',
+  '// Route through the persistence choke point (writeKey) so the server-settings',
+  'function saveDecisions(next: Record<string, boolean>) {',
+  `function saveDecisions(next: Record<string, boolean>) {
+  // Route through the persistence choke point (writeKey) so the server-settings
+  // sync sees the change and mirrors plugin enable/disable across devices.
+  writeKey(DECISIONS_KEY, JSON.stringify(next))`,
+)
+patchFile(
+  'contrib/plugins-store.ts',
+  'export function refreshPluginDecisions(): void {',
+  'export const $pluginDecisions = atom<Record<string, boolean>>(loadDecisions())',
+  `export const $pluginDecisions = atom<Record<string, boolean>>(loadDecisions())
+
+/**
+ * Re-read plugin decisions from localStorage into the atom. Needed after
+ * server-settings hydration writes decisions on a fresh browser (the atom
+ * initializes at module scope, before hydration runs).
+ */
+export function refreshPluginDecisions(): void {
+  $pluginDecisions.set(loadDecisions())
+}`,
+)
+
 if (touched === 0) {
   console.log('no patches applied (all present)')
 } else {

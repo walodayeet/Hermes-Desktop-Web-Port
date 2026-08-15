@@ -75,11 +75,16 @@ export function pluginActive(id: string, defaultEnabled = true): boolean {
 }
 
 function saveDecisions(next: Record<string, boolean>) {
-  $pluginDecisions.set(next)
-
   // Route through the persistence choke point (writeKey) so the server-settings
   // sync sees the change and mirrors plugin enable/disable across devices.
   writeKey(DECISIONS_KEY, JSON.stringify(next))
+  $pluginDecisions.set(next)
+
+  try {
+    window.localStorage.setItem(DECISIONS_KEY, JSON.stringify(next))
+  } catch {
+    // Nonfatal.
+  }
 }
 
 export const $pluginRecords = atom<Record<string, PluginRecord>>({})
