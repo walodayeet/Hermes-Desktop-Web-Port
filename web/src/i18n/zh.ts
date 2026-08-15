@@ -1212,6 +1212,7 @@ export const zh: Translations = {
   skills: {
     tabSkills: '技能',
     tabToolsets: '工具集',
+    configuringProfile: '正在配置：',
     tabMcp: 'MCP',
     tabHub: '浏览技能中心',
     all: '全部',
@@ -2166,6 +2167,7 @@ export const zh: Translations = {
       rename: '重命名',
       archive: '归档',
       newWindow: '新窗口',
+      openInTerminal: '在终端中打开',
       hideTabBar: '隐藏标签栏',
       openInNewTab: '在新标签页中打开',
       openInSplit: '在分屏中打开',

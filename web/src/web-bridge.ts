@@ -442,6 +442,7 @@ export function installWebBridge(): void {
 
     // --- windows / overlays: no-ops in a browser -------------------------------
     openSessionWindow: async () => ({ ok: false, error: 'unsupported-in-web' }),
+    openSessionInTerminal: async () => ({ ok: false, error: 'unsupported-in-web' }),
     openWindow: async () => ({ ok: false, error: 'unsupported-in-web' }),
     claimAmbientCue: async () => true,
 
