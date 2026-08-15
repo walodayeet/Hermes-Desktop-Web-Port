@@ -374,6 +374,12 @@ patchFile(
   }`,
 )
 patchFile(
+  'components/ui/copy-button.tsx',
+  '// Web port: surface writeClipboard failure instead of fake success',
+  '  if (window.hermesDesktop?.writeClipboard) {\n    await window.hermesDesktop.writeClipboard(text)\n\n    return\n  }',
+  `  if (window.hermesDesktop?.writeClipboard) {\n    // Web port: surface writeClipboard failure instead of fake success —\n    // the bridge returns false when the browser blocked the write.\n    const ok = await window.hermesDesktop.writeClipboard(text)\n\n    if (ok) {\n      return\n    }\n\n    throw new Error('Clipboard write failed')\n  }`,
+)
+patchFile(
   'global.d.ts',
   '/** Web port: real filename for a virtual web-input:<n> path, else null. */',
   '      selectPaths: (options?: HermesSelectPathsOptions) => Promise<string[]>',

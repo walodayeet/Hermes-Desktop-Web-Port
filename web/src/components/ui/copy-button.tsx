@@ -20,9 +20,15 @@ export async function writeClipboardText(text: string) {
   }
 
   if (window.hermesDesktop?.writeClipboard) {
-    await window.hermesDesktop.writeClipboard(text)
+    // Web port: surface writeClipboard failure instead of fake success —
+    // the bridge returns false when the browser blocked the write.
+    const ok = await window.hermesDesktop.writeClipboard(text)
 
-    return
+    if (ok) {
+      return
+    }
+
+    throw new Error('Clipboard write failed')
   }
 
   if (navigator.clipboard?.writeText) {

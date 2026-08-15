@@ -628,7 +628,23 @@ export function installWebBridge(): void {
 
     // --- notifications / media ----------------------------------------------------
     notify: async () => true,
-    requestMicrophoneAccess: async () => false,
+    // The browser handles mic permission natively via getUserMedia; report
+    // capability instead of denying unconditionally. False only when the
+    // browser has no getUserMedia/MediaRecorder (insecure context, old UA) —
+    // the voice recorder surfaces that as "runtime does not support mic".
+    requestMicrophoneAccess: async () => {
+      try {
+        const hasApi = typeof navigator !== 'undefined' && Boolean(navigator.mediaDevices?.getUserMedia) && typeof MediaRecorder !== 'undefined'
+        if (!hasApi) return false
+        // Probe for at least one audio input without consuming the device:
+        // enumerateDevices tells us whether the platform exposes a mic at all.
+        const devices = await navigator.mediaDevices.enumerateDevices().catch(() => null)
+        if (devices === null) return true
+        return devices.some(d => d.kind === 'audioinput')
+      } catch {
+        return true
+      }
+    },
 
     // --- files / clipboard: browser-native -----------------------------------------
     readFileDataUrl: async (filePath) => {
@@ -670,9 +686,30 @@ export function installWebBridge(): void {
     // paths return null so callers fall back to path parsing.
     fileNameForPath: (filePath) => webFileForKey(filePath)?.name ?? null,
     writeClipboard: async (text) => {
+      // navigator.clipboard.writeText only exists in secure contexts
+      // (HTTPS / localhost). On LAN-IP http (phone testing) it's undefined,
+      // so fall back to the legacy execCommand('copy') textarea trick, which
+      // works on any page the browser allows.
       try {
-        await navigator.clipboard.writeText(text)
-        return true
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(text)
+          return true
+        }
+      } catch {
+        // Fall through to the execCommand path.
+      }
+      try {
+        const textarea = document.createElement('textarea')
+        textarea.value = text
+        textarea.setAttribute('readonly', '')
+        textarea.style.position = 'fixed'
+        textarea.style.opacity = '0'
+        document.body.appendChild(textarea)
+        textarea.select()
+        textarea.setSelectionRange(0, text.length)
+        const ok = document.execCommand('copy')
+        textarea.remove()
+        return ok
       } catch {
         return false
       }
