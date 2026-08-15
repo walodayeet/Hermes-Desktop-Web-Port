@@ -19,6 +19,8 @@
  */
 
 import { onPersistenceEvent, readKey, writeKey } from './storage'
+import { refreshPluginDecisions } from '@/contrib/plugins-store'
+import { refreshUserThemes } from '@/themes/user-themes'
 
 /**
  * localStorage keys that are durable user preferences and may be mirrored
@@ -66,10 +68,38 @@ async function fetchServer(): Promise<Record<string, string>> {
  */
 export async function hydrateServerSettings(): Promise<void> {
   const server = await fetchServer()
+  let touchedThemes = false
+  let touchedPlugins = false
   for (const key of SYNCED_KEYS) {
     const value = server[key]
     if (value !== undefined) {
       writeKey(key, value)
+      if (key === 'hermes-desktop-user-themes-v1') touchedThemes = true
+      if (key === 'hermes.desktop.pluginDecisions.v2' || key === 'hermes.desktop.disabledPlugins.v1') touchedPlugins = true
+    }
+  }
+  // The atoms init at module scope from localStorage (pre-hydration); refresh
+  // them so server values apply on first paint without a reload.
+  if (touchedThemes) refreshUserThemes()
+  if (touchedPlugins) refreshPluginDecisions()
+  // Self-heal: mirror the merged local state (server wins for conflicts, but
+  // keys that only exist locally — e.g. a theme installed before the sync
+  // shipped — get pushed so a fresh device sees them too).
+  const merged: Record<string, string> = {}
+  for (const key of SYNCED_KEYS) {
+    const local = readKey(key)
+    if (local !== null) merged[key] = local
+  }
+  if (Object.keys(merged).length > 0) {
+    try {
+      await fetch(serverUrl(), {
+        method: 'PUT',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(merged),
+      })
+    } catch {
+      // Best-effort.
     }
   }
 }

@@ -12,6 +12,8 @@
 
 import { atom, computed } from 'nanostores'
 
+import { writeKey } from '@/lib/storage'
+
 import { registry } from '@/contrib/registry'
 
 import { $backendThemes } from './backend-sync'
@@ -76,15 +78,23 @@ function readStored(): Record<string, DesktopTheme> {
 }
 
 function persist(record: Record<string, DesktopTheme>) {
-  try {
-    window.localStorage.setItem(USER_THEMES_KEY, JSON.stringify(record))
-  } catch {
-    // Best-effort: a restricted storage context shouldn't break theming.
-  }
+  // Route through the persistence choke point (writeKey) so the server-settings
+  // sync sees the write and mirrors installed themes across devices.
+  writeKey(USER_THEMES_KEY, JSON.stringify(record))
 }
 
 /** Reactive map of installed user themes, keyed by slug. */
 export const $userThemes = atom<Record<string, DesktopTheme>>(typeof window === 'undefined' ? {} : readStored())
+
+/**
+ * Re-read user themes from localStorage into the atom. Needed after
+ * server-settings hydration writes themes on a fresh browser (the atom
+ * initializes at module scope, before hydration runs).
+ */
+export function refreshUserThemes(): void {
+  if (typeof window === 'undefined') return
+  $userThemes.set(readStored())
+}
 
 /** Install (or replace) a user theme. Returns the stored theme. */
 export function installUserTheme(theme: DesktopTheme): DesktopTheme {

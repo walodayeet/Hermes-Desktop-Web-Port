@@ -10,6 +10,8 @@
 
 import { atom } from 'nanostores'
 
+import { writeKey } from '@/lib/storage'
+
 export type PluginKind = 'bundled' | 'disk' | 'runtime'
 export type PluginStatus = 'disabled' | 'error' | 'loaded'
 
@@ -55,6 +57,15 @@ function loadDecisions(): Record<string, boolean> {
 
 export const $pluginDecisions = atom<Record<string, boolean>>(loadDecisions())
 
+/**
+ * Re-read plugin decisions from localStorage into the atom. Needed after
+ * server-settings hydration writes decisions on a fresh browser (the atom
+ * initializes at module scope, before hydration runs).
+ */
+export function refreshPluginDecisions(): void {
+  $pluginDecisions.set(loadDecisions())
+}
+
 /** Whether a plugin should register: the user's explicit choice if any, else
  *  the plugin's own default (true for ordinary plugins, false for opt-in). */
 export function pluginActive(id: string, defaultEnabled = true): boolean {
@@ -66,11 +77,9 @@ export function pluginActive(id: string, defaultEnabled = true): boolean {
 function saveDecisions(next: Record<string, boolean>) {
   $pluginDecisions.set(next)
 
-  try {
-    window.localStorage.setItem(DECISIONS_KEY, JSON.stringify(next))
-  } catch {
-    // Nonfatal.
-  }
+  // Route through the persistence choke point (writeKey) so the server-settings
+  // sync sees the change and mirrors plugin enable/disable across devices.
+  writeKey(DECISIONS_KEY, JSON.stringify(next))
 }
 
 export const $pluginRecords = atom<Record<string, PluginRecord>>({})

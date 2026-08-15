@@ -21,6 +21,10 @@ services:
       # trusted network.
       - WEB_FS_ROOT=${WEB_FS_ROOT:-/workspace}
       - HERMES_TERM_CWD=${HERMES_TERM_CWD:-/workspace}
+      # Host path that got bind-mounted onto WEB_FS_ROOT. The gateway reports
+      # HOST paths (sessions' cwd etc.); the proxy rewrites them onto the
+      # container root so the Files rail resolves. Leave empty to disable.
+      - WEB_FS_HOST_ROOT=${WEB_FS_SRC:-}
       # Desktop-plugins door. Mount a directory of plugins (each
       # <name>/plugin.js) if you use the plugin runtime; empty otherwise.
       # Host path comes from HERMES_PLUGINS_SRC (default: repo-local ./plugins).

@@ -35,6 +35,13 @@ const PLUGINS_DIR = process.env.HERMES_PLUGINS_DIR || path.join(os.homedir(), '.
 // stay inside the (real) root.
 const WEB_FS_ROOT = process.env.WEB_FS_ROOT || os.homedir();
 
+// Docker: the gateway reports HOST paths (sessions' cwd, git roots), but the
+// container's WEB_FS_ROOT is the bind-mounted /workspace. When
+// WEB_FS_HOST_ROOT is set (the host dir that got mounted onto WEB_FS_ROOT),
+// rewrite host-prefixed requests onto the container root so the Files rail
+// and file opens resolve instead of failing "outside web-fs root".
+const WEB_FS_HOST_ROOT = process.env.WEB_FS_HOST_ROOT || '';
+
 // Interactive terminal default cwd. In docker this is the mounted workspace
 // (WEB_FS_ROOT); on a bare host, the agent's home.
 const TERM_DEFAULT_CWD = process.env.HERMES_TERM_CWD || os.homedir();
@@ -408,7 +415,25 @@ function dataUrlMime(filePath) {
 // Resolve a requested path under WEB_FS_ROOT, rejecting traversal lexically.
 function resolveWebFsPath(requestedPath) {
   const root = path.resolve(WEB_FS_ROOT);
-  const target = path.resolve(root, requestedPath || '/');
+  let p = requestedPath || '/';
+  // Host→container path translation (docker): the gateway reports host paths
+  // (e.g. /home/walos/G/work), but the container sees the bind-mounted
+  // /workspace. Map the host root prefix onto the container root. Exact root
+  // → '/' so an empty dir (the mounted home) resolves to the root itself.
+  if (WEB_FS_HOST_ROOT) {
+    const hostRoot = path.resolve(WEB_FS_HOST_ROOT);
+    if (p === hostRoot) {
+      // Empty string → path.resolve(root, '') === root (a '/' would be
+      // treated as absolute and escape the root).
+      p = '';
+    } else if (p.startsWith(hostRoot + path.sep)) {
+      // Slice the host prefix, then drop the leading separator so
+      // path.resolve(root, rest) keeps the root (a leading '/' would make
+      // the slice absolute and discard root).
+      p = p.slice(hostRoot.length).replace(/^[/\\]+/, '');
+    }
+  }
+  const target = path.resolve(root, p);
   if (target !== root && !target.startsWith(root + path.sep)) {
     return null;
   }
