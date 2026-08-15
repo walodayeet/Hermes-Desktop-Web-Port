@@ -24,6 +24,17 @@
   html {
     font-size: 18px;
   }
+  /* Web port (mobile): statusbar horizontal scroll — let statusbar groups
+     scroll sideways instead of truncating plugin items at the right edge.
+     No visible scrollbar — touch scroll only (desktop keeps overflow-x-clip). */
+  [data-slot='statusbar'] > div {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  [data-slot='statusbar'] > div::-webkit-scrollbar {
+    display: none;
+  }
 }
 
 /* Web port (iOS): Safari auto-zooms into any form field whose font-size is

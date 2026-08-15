@@ -168,6 +168,46 @@ select,
 }`,
 )
 
+// --- styles.css: statusbar horizontal scroll on mobile --------------------------
+// The statusbar's groups are `overflow-x-clip` (desktop: a wide item must
+// never paint a scrollbar). On a phone, plugin status items (gateway check,
+// tasks, pin, drafts, language) overflow 390px and get silently truncated —
+// the screenshot shows "tasks"/"#vw" cut at the right edge. On touch screens
+// make the groups scrollable (scrollbars hidden) so every item is reachable.
+// NOTE: must run AFTER the iOS input floor patch (anchors the media block
+// that patch inserts).
+patchFile(
+  'styles.css',
+  'Web port (mobile): statusbar horizontal scroll',
+  `@media (max-width: 767px) {
+  :root {
+    --dt-base-size: 1.125rem;
+  }
+  html {
+    font-size: 18px;
+  }
+}`,
+  `@media (max-width: 767px) {
+  :root {
+    --dt-base-size: 1.125rem;
+  }
+  html {
+    font-size: 18px;
+  }
+  /* Web port (mobile): statusbar horizontal scroll — let statusbar groups
+     scroll sideways instead of truncating plugin items at the right edge.
+     No visible scrollbar — touch scroll only (desktop keeps overflow-x-clip). */
+  [data-slot='statusbar'] > div {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  [data-slot='statusbar'] > div::-webkit-scrollbar {
+    display: none;
+  }
+}`,
+)
+
 // --- styles.css: safe-area vars ----------------------------------------------------
 patchFile(
   'styles.css',
@@ -476,6 +516,57 @@ patchFile(
 
 .fit-text {
   --fit-captured-length: initial;`,
+)
+
+// --- controller.tsx: shell titlebar strip safe-area-top -----------------------
+// The contrib shell's own 34px titlebar strip is hard-coded to y=0. In a
+// standalone iOS PWA (viewport-fit=cover + black-translucent) the webview
+// extends UNDER the iOS status bar, so the strip + fixed control clusters
+// (top:5px) sit behind it and are invisible. Fold the safe-area inset into
+// the strip's height so its background (and the clusters' anchor) start
+// below the status bar. Safe-area vars come from styles.css (0 on desktop).
+patchFile(
+  'app/contrib/controller.tsx',
+  'Web port (iOS): shell titlebar strip safe-area-top',
+  '<div className="relative flex h-[34px] shrink-0 items-center bg-(--ui-sidebar-surface-background) text-xs">',
+  `{/* Web port (iOS): shell titlebar strip safe-area-top — see reapply-port-patches.mjs */}
+<div className="relative flex h-[calc(34px+var(--safe-area-top,0px))] shrink-0 items-center bg-(--ui-sidebar-surface-background) pt-[var(--safe-area-top,0px)] text-xs">`,
+)
+
+// --- titlebar-controls.tsx: fixed clusters follow safe-area-top ---------------
+patchFile(
+  'app/shell/titlebar-controls.tsx',
+  'Web port (iOS): titlebar cluster top safe-area-top (left)',
+  "'left-(--titlebar-controls-left) top-(--titlebar-controls-top) translate-y-(--titlebar-controls-y-nudge)'",
+  `/* Web port (iOS): titlebar cluster top safe-area-top (left) — see reapply-port-patches.mjs */
+'left-(--titlebar-controls-left) top-[calc(var(--titlebar-controls-top)+var(--safe-area-top,0px))] translate-y-(--titlebar-controls-y-nudge)'`,
+)
+patchFile(
+  'app/shell/titlebar-controls.tsx',
+  'Web port (iOS): titlebar cluster top safe-area-top (pane)',
+  "'top-[calc(var(--titlebar-controls-top)+var(--right-rail-top-inset,0px))] right-[calc(var(--titlebar-tools-right)+var(--shell-preview-toolbar-gap,0))]'",
+  `/* Web port (iOS): titlebar cluster top safe-area-top (pane) — see reapply-port-patches.mjs */
+'top-[calc(var(--titlebar-controls-top)+var(--right-rail-top-inset,0px)+var(--safe-area-top,0px))] right-[calc(var(--titlebar-tools-right)+var(--shell-preview-toolbar-gap,0))]'`,
+)
+patchFile(
+  'app/shell/titlebar-controls.tsx',
+  'Web port (iOS): titlebar cluster top safe-area-top (right)',
+  "'right-(--titlebar-tools-right) top-(--titlebar-controls-top)'",
+  `/* Web port (iOS): titlebar cluster top safe-area-top (right) — see reapply-port-patches.mjs */
+'right-(--titlebar-tools-right) top-[calc(var(--titlebar-controls-top)+var(--safe-area-top,0px))]'`,
+)
+
+// --- statusbar-controls.tsx: footer extends into home-indicator safe area -----
+// The footer's h-5 (20px) box ends above the home indicator; the bar's
+// background stops there, leaving a visible gap below the toolbar in
+// standalone iOS. Grow the box by safe-area-bottom and pad content up, so
+// the bar's background runs all the way under the home indicator.
+patchFile(
+  'app/shell/statusbar-controls.tsx',
+  'Web port (iOS): statusbar footer safe-area-bottom',
+  "'flex h-5 shrink-0 items-stretch justify-between gap-2 bg-(--ui-sidebar-surface-background) px-1 py-0 text-(--ui-text-tertiary) [-webkit-app-region:no-drag]'",
+  `/* Web port (iOS): statusbar footer safe-area-bottom — see reapply-port-patches.mjs */
+'flex h-[calc(1.25rem+var(--safe-area-bottom,0px))] shrink-0 items-stretch justify-between gap-2 bg-(--ui-sidebar-surface-background) px-1 pb-[var(--safe-area-bottom,0px)] text-(--ui-text-tertiary) [-webkit-app-region:no-drag]'`,
 )
 
 if (touched === 0) {

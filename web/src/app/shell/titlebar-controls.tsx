@@ -251,7 +251,8 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
         aria-label={t.shell.windowControls}
         className={cn(
           titlebarToolClusterClass,
-          'left-(--titlebar-controls-left) top-(--titlebar-controls-top) translate-y-(--titlebar-controls-y-nudge)'
+          /* Web port (iOS): titlebar cluster top safe-area-top (left) — see reapply-port-patches.mjs */
+'left-(--titlebar-controls-left) top-[calc(var(--titlebar-controls-top)+var(--safe-area-top,0px))] translate-y-(--titlebar-controls-y-nudge)'
         )}
       >
         {leftToolbarTools
@@ -274,7 +275,8 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
           aria-label={t.shell.paneControls}
           className={cn(
             titlebarToolClusterClass,
-            'top-[calc(var(--titlebar-controls-top)+var(--right-rail-top-inset,0px))] right-[calc(var(--titlebar-tools-right)+var(--shell-preview-toolbar-gap,0))]'
+            /* Web port (iOS): titlebar cluster top safe-area-top (pane) — see reapply-port-patches.mjs */
+'top-[calc(var(--titlebar-controls-top)+var(--right-rail-top-inset,0px)+var(--safe-area-top,0px))] right-[calc(var(--titlebar-tools-right)+var(--shell-preview-toolbar-gap,0))]'
           )}
         >
           {visiblePaneTools.map(tool => (
@@ -285,7 +287,8 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
 
       <div
         aria-label={t.shell.appControls}
-        className={cn(titlebarToolClusterClass, 'right-(--titlebar-tools-right) top-(--titlebar-controls-top)')}
+        className={cn(titlebarToolClusterClass, /* Web port (iOS): titlebar cluster top safe-area-top (right) — see reapply-port-patches.mjs */
+'right-(--titlebar-tools-right) top-[calc(var(--titlebar-controls-top)+var(--safe-area-top,0px))]')}
       >
         {visibleSystemTools.map(tool => (
           <TitlebarToolButton key={tool.id} navigate={navigate} tool={tool} />
