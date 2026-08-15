@@ -1,7 +1,10 @@
 services:
   hermes-desktop-web:
+    # Published image (GHCR, auto-built on main pushes by .github/workflows/publish.yml).
+    # `docker compose up` pulls this; add --build (or delete the image) to build
+    # locally from ./Dockerfile instead.
+    image: ghcr.io/walodayeet/hermes-desktop-web:latest
     build: .
-    image: hermes-desktop-web:latest
     container_name: hermes-desktop-web
     restart: unless-stopped
     ports:

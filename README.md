@@ -45,7 +45,7 @@ renderer byte-for-byte and supplies the bridge from the browser:
 
 ```sh
 cp .env.example .env        # set HERMES_TARGET to your agent backend
-docker compose up -d --build
+docker compose up -d        # pulls the published image (ghcr.io/walodayeet/hermes-desktop-web)
 # open http://127.0.0.1:4000, sign in with your gateway credentials
 ```
 
@@ -58,6 +58,11 @@ host/server. Point `HERMES_TARGET` at it:
 | Docker Desktop on same machine | `host.docker.internal:9119` |
 | Agent on another machine (LAN / Tailscale) | `<agent-ip>:9119` |
 | Agent containerized in compose | `hermes-agent:9119` |
+
+A prebuilt image is published to GHCR on every `main` push
+(`ghcr.io/walodayeet/hermes-desktop-web:latest`), so `docker compose up -d`
+pulls instead of building. To build from source instead (e.g. a fork, or
+unreleased local changes), use `docker compose up -d --build`.
 
 ## Run without Docker
 
