@@ -7,7 +7,11 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  # GHCR image names MUST be lowercase. The repo was renamed to
+  # Hermes-Desktop-Web-Port (uppercase) — `github.repository` would produce an
+  # invalid tag, so pin the canonical lowercase name explicitly (compose uses
+  # the same ref).
+  IMAGE_NAME: walodayeet/hermes-desktop-web
 
 jobs:
   publish:
