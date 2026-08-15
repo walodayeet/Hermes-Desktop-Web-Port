@@ -460,6 +460,24 @@ export function refreshPluginDecisions(): void {
 }`,
 )
 
+patchFile(
+  'styles.css',
+  'Web port (iOS): intro wordmark fit-text fails on Safari',
+  '.fit-text {\n  --fit-captured-length: initial;',
+  `/* Web port (iOS): the intro wordmark uses .fit-text, whose tan(atan2()) +
+   @property ratio math fails on iOS Safari (font stays at --fit-min, the
+   wordmark overflows the screen and clips — "HERMES AGEN"). Override with a
+   deterministic container-query clamp: scales with the container width and
+   caps at the same 2.75rem desktop size, so desktop is unchanged. */
+[data-slot='aui_intro'] .fit-text > :not([aria-hidden]) > * {
+  font-size: clamp(1.5rem, 9.5cqi, 2.75rem);
+  white-space: nowrap;
+}
+
+.fit-text {
+  --fit-captured-length: initial;`,
+)
+
 if (touched === 0) {
   console.log('no patches applied (all present)')
 } else {
