@@ -629,6 +629,22 @@ export function installWebBridge(): void {
     oauthLoginConnectionConfig: async () => ({ ok: false, baseUrl: '', connected: false }),
     oauthLogoutConnectionConfig: async () => ({ ok: false, connected: false }),
 
+    // --- v2 multi-connection registry: unsupported in the web port (single
+    // same-origin backend only) — a single implicit local connection. ---------
+    connections: {
+      list: async () => ({ version: 1, primary: 'local', secureTokenStorage: false, connections: [] }),
+      save: async () => {
+        throw new Error('unsupported-in-web')
+      },
+      remove: async () => {
+        throw new Error('unsupported-in-web')
+      },
+      setPrimary: async () => {
+        throw new Error('unsupported-in-web')
+      },
+      test: async () => ({ ok: false, reachable: false, error: 'unsupported-in-web', version: null }),
+    },
+
     cloud: {
       status: async () => ({ portalBaseUrl: '', signedIn: false }),
       login: async () => ({ portalBaseUrl: '', signedIn: false, ok: false }),
@@ -871,6 +887,9 @@ export function installWebBridge(): void {
     onFoundInPage: () => () => {},
     findInPage: async () => ({ count: 0 }),
     stopFindInPage: async () => {},
+    // Ctrl/Cmd+F OS-compositor grab workaround: Electron-only (main forwards a
+    // pre-empted accelerator). The browser never pre-empts the chord.
+    onOpenFindBarRequested: () => () => {},
     getOnBattery: async () => false,
     onBatteryChanged: () => () => {},
 

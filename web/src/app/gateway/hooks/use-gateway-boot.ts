@@ -17,7 +17,9 @@ import {
   $gateway,
   closeSecondaryGateways,
   configureGatewayRegistry,
+  disposeSecondariesForConnection,
   ensureGatewayForProfile,
+  isActivePrimary,
   pruneSecondaryGateways,
   reconnectSecondaryGateways,
   reportPrimaryGatewayState,
@@ -38,7 +40,13 @@ import {
   setCurrentCwd,
   setSessionsLoading
 } from '@/store/session'
-import { $attentionSessionIds, $workingSessionIds, resetTileRuntimeBindings } from '@/store/session-states'
+import {
+  $attentionSessionIds,
+  $workingSessionIds,
+  liveSessionScopes,
+  recordSessionEventScope,
+  resetTileRuntimeBindings
+} from '@/store/session-states'
 import { windowProfileOverride } from '@/store/windows'
 import type { RpcEvent } from '@/types/hermes'
 
@@ -161,13 +169,23 @@ export function useGatewayBoot({
         // "Starting Hermes…". The probe is a no-op for a healthy or local backend.
         await desktop.revalidateConnection?.().catch(() => undefined)
 
-        const conn = await desktop.getConnection($activeGatewayProfile.get())
+        // Primary sleep/wake reconnect must dial the WINDOW-owned primary backend
+        // (same as boot/softSwitch). Passing $activeGatewayProfile would retarget
+        // this primary socket at a secondary profile's backend after a live swap.
+        // Secondaries reconnect via reconnectSecondaryGateways().
+        const conn = await desktop.getConnection()
 
         if (cancelled) {
           return
         }
 
-        publish(conn)
+        // Only publish the primary descriptor when the primary is active.
+        // Otherwise a background-profile view would inherit the primary's
+        // mode/baseUrl and break image.attach / fs / media routing (#46651).
+        if (isActivePrimary()) {
+          publish(conn)
+        }
+
         // Re-mint the WS URL before reconnecting. OAuth tickets are single-use
         // with a short TTL, so the ticket baked into the cached conn.wsUrl is
         // dead on every reconnect after the initial boot — reusing it surfaces
@@ -394,7 +412,15 @@ export function useGatewayBoot({
     callbacksRef.current.onGatewayReady(gateway)
     setPrimaryGateway(gateway, survivor?.profile ?? normalizeProfileKey($activeGatewayProfile.get()))
     // Secondary (background-profile) sockets funnel into the same handler.
-    configureGatewayRegistry({ onEvent: event => callbacksRef.current.handleGatewayEvent(event) })
+    // Record each event's source scope first: registry-tagged events feed the
+    // (connectionId, profile) keep-set so two sources exposing the same
+    // profile name (every source has a 'default') can't collide.
+    configureGatewayRegistry({
+      onEvent: event => {
+        recordSessionEventScope(event)
+        callbacksRef.current.handleGatewayEvent(event)
+      }
+    })
 
     const offState = gateway.onState(st => {
       // Mirror to the composer only while the primary is the active profile —
@@ -434,6 +460,18 @@ export function useGatewayBoot({
     const offPowerResume = desktop.onPowerResume?.(() => reconnectNow())
     const offConnectionApplied = desktop.onConnectionApplied?.(() => void softSwitch())
 
+    // Registry lifecycle: a removed connection's secondaries must close NOW
+    // (remote/cloud have no local process whose death would drop the socket —
+    // they'd keep streaming ghost events); a materially edited one is
+    // disposed AND re-dialed so its sockets target the new endpoint.
+    const offConnectionsChanged = desktop.connections?.onChanged?.(payload => {
+      if (!payload || typeof payload.connectionId !== 'string') {
+        return
+      }
+
+      disposeSecondariesForConnection(payload.connectionId, { redial: payload.reason === 'updated' })
+    })
+
     const onOnline = () => reconnectNow()
 
     const onVisible = () => {
@@ -458,7 +496,11 @@ export function useGatewayBoot({
     // to idle-reap. The active profile is always spared.
     const recomputeKeptGateways = () => {
       const live = new Set([...$workingSessionIds.get(), ...$attentionSessionIds.get()])
-      const keep = new Set<string>()
+      // Registry-scoped (connectionId, profile) scopes with live work. Two
+      // sources can expose the same profile name (every source has a
+      // 'default'), so bare profile names can't represent a non-local
+      // source's liveness without keeping the wrong gateway alive.
+      const keep = liveSessionScopes()
 
       for (const session of $sessions.get()) {
         if (live.has(session.id)) {
@@ -636,6 +678,7 @@ export function useGatewayBoot({
       document.removeEventListener('visibilitychange', onVisible)
       offPowerResume?.()
       offConnectionApplied?.()
+      offConnectionsChanged?.()
       offState()
       offEvent()
       offExit()
