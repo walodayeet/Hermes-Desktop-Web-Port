@@ -440,10 +440,37 @@ export function installWebBridge(): void {
       return fetchJson<T>(path, init, timeoutMs ?? 30_000)
     },
 
-    // --- windows / overlays: no-ops in a browser -------------------------------
-    openSessionWindow: async () => ({ ok: false, error: 'unsupported-in-web' }),
-    openSessionInTerminal: async () => ({ ok: false, error: 'unsupported-in-web' }),
-    openWindow: async () => ({ ok: false, error: 'unsupported-in-web' }),
+    // --- windows / overlays: browser tabs stand in for OS windows --------------
+    // Electron opens a real BrowserWindow at `?win=secondary[&watch=1]#/<id>`
+    // (see apps/desktop/electron/session-windows.ts buildSessionWindowUrl) — the
+    // renderer already reads those flags from location.search (store/windows.ts)
+    // to render the compact secondary-window chrome and lazy-resume watch mode.
+    // A browser has no window-management API, but a new tab at the exact same
+    // URL shape drives the identical renderer code path, so open it there.
+    openSessionWindow: async (sessionId: string, opts?: { watch?: boolean }) => {
+      if (!sessionId) {
+        return { ok: false, error: 'invalid-session-id' }
+      }
+      const query = `?win=secondary${opts?.watch ? '&watch=1' : ''}`
+      const url = `${window.location.origin}${window.location.pathname}${query}#/${encodeURIComponent(sessionId)}`
+      const opened = window.open(url, '_blank', 'noopener')
+      return opened ? { ok: true } : { ok: false, error: 'popup-blocked' }
+    },
+    // No local terminal to hand a session to from a browser tab: Electron
+    // spawns `hermes --tui --resume <id>` in the user's own terminal emulator
+    // on the machine it's running on — a browser tab can't launch OS
+    // processes. Bridge contract requires this member (global.d.ts is
+    // upstream-synced), so report failure rather than pretending to open one;
+    // the button click surfaces this as a toast via runWindowOpen().
+    openSessionInTerminal: async () => ({
+      ok: false,
+      error: 'unsupported-in-web: open a terminal on the machine running the backend and run `hermes --tui --resume <sessionId>`',
+    }),
+    openWindow: async () => {
+      const url = `${window.location.origin}${window.location.pathname}`
+      const opened = window.open(url, '_blank', 'noopener')
+      return opened ? { ok: true } : { ok: false, error: 'popup-blocked' }
+    },
     claimAmbientCue: async () => true,
 
     petOverlay: {
