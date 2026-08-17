@@ -896,7 +896,9 @@ export function usePromptActions({
         updateSessionState(sessionId, state => ({
           ...state,
           busy: false,
-          awaitingResponse: false
+          awaitingResponse: false,
+          turnLive: false,
+          turnStartedAt: null
         }))
         notifyError(err, copy.regenerateFailed)
       }
@@ -970,6 +972,8 @@ export function usePromptActions({
           ...state,
           busy: false,
           awaitingResponse: false,
+          turnLive: false,
+          turnStartedAt: null,
           messages
         }))
         throw err
@@ -1091,7 +1095,14 @@ export function usePromptActions({
         setMutableRef(busyRef, false)
         setBusy(false)
         setAwaitingResponse(false)
-        updateSessionState(sessionId, state => ({ ...state, busy: false, awaitingResponse: false, messages }))
+        updateSessionState(sessionId, state => ({
+          ...state,
+          busy: false,
+          awaitingResponse: false,
+          turnLive: false,
+          turnStartedAt: null,
+          messages
+        }))
         notifyError(surfaced, unavailable ? copy.editTurnUnavailable : copy.editFailed)
       }
     },

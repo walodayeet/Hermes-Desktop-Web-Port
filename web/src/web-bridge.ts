@@ -415,6 +415,10 @@ export function installWebBridge(): void {
 
     revalidateConnection: async () => ({ ok: true, rebuilt: false }),
     touchBackend: async () => ({ ok: true }),
+    // Web port: single local backend — no separate profile connections, so no
+    // plugin profile routes to advertise (upstream Electron enumerates the
+    // union connection registry; the web port has none).
+    getProfileRoutes: async () => [],
 
     getGatewayWsUrl: async (profile) => mintWsUrl(profile).then(
       (wsUrl) => ({ ok: true as const, wsUrl }),
