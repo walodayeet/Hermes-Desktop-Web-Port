@@ -18,6 +18,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const zlib = require('zlib');
 
 const PORT = Number(process.env.PORT) || 4000;
 const TARGET_RAW = process.env.HERMES_TARGET || '127.0.0.1:9119';
@@ -259,6 +260,47 @@ const MIME = {
   '.woff2': 'font/woff2',
 };
 
+// Extensions that benefit from transport compression. Images and
+// already-compressed formats are never compressed (wasted CPU, often larger
+// output); everything here is text-like and wins from gzip/br.
+// .woff2 is already brotli-compressed by the font tooling — compressing it
+// again adds nothing and risks double-encoded responses, so it stays out.
+const COMPRESSIBLE = new Set([
+  '.html', '.js', '.mjs', '.css', '.json', '.map', '.webmanifest', '.svg',
+  '.txt', '.xml', '.md', '.markdown', '.ttf', '.otf', '.woff',
+]);
+
+// In-memory cache of on-the-fly compressed bodies so repeated requests for
+// the same asset don't re-compress. Key: `${target}\0${encoding}`; entry:
+// { mtimeMs, body }. Entries are validated against the source file's mtime
+// and evicted (oldest first) once the cap is reached.
+const COMPRESS_CACHE = new Map();
+const COMPRESS_CACHE_MAX = 30;
+
+// Parse Accept-Encoding. Returns 'br' | 'gzip' | null. Brotli is preferred
+// when the client accepts both. An empty header or a bare '*' means "no
+// preference" → no compression (a wildcard would otherwise match anything).
+function acceptedEncoding(acceptEncoding) {
+  if (!acceptEncoding || !String(acceptEncoding).trim()) return null;
+  const header = String(acceptEncoding).toLowerCase().trim();
+  if (header === '*') return null;
+  const accepted = new Set();
+  for (const part of header.split(',')) {
+    const [name, ...params] = part.trim().split(';');
+    const enc = name.trim();
+    if (!enc) continue;
+    let q = 1;
+    for (const p of params) {
+      const m = /^q\s*=\s*([0-9.]+)/.exec(p.trim());
+      if (m) q = parseFloat(m[1]);
+    }
+    if (q > 0) accepted.add(enc);
+  }
+  if (accepted.has('br')) return 'br';
+  if (accepted.has('gzip') || accepted.has('x-gzip')) return 'gzip';
+  return null;
+}
+
 function serveStatic(req, res) {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     res.writeHead(405, { 'Content-Type': 'text/plain' });
@@ -285,23 +327,107 @@ function serveStatic(req, res) {
 
   fs.stat(filePath, (statErr, stat) => {
     const target = !statErr && stat.isFile() ? filePath : path.join(DIST, 'index.html');
-    fs.readFile(target, (readErr, data) => {
-      if (readErr) {
-        res.writeHead(404, { 'Content-Type': 'text/plain' });
-        res.end('Not Found');
+    const ext = path.extname(target).toLowerCase();
+    const enc = acceptedEncoding(req.headers['accept-encoding']);
+    const compressible = COMPRESSIBLE.has(ext);
+    const baseHeaders = {
+      'Content-Type': MIME[ext] || 'application/octet-stream',
+      'Cache-Control':
+        ext === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable',
+    };
+
+    const send = (body, headers) => {
+      headers['Content-Length'] = body.length;
+      res.writeHead(200, headers);
+      res.end(req.method === 'HEAD' ? undefined : body);
+    };
+
+    if (!compressible || !enc) {
+      // Raw path (or explicitly uncompressed): still Vary-marked for
+      // compressible types so caches re-negotiate per Accept-Encoding.
+      const headers = { ...baseHeaders };
+      if (compressible) headers['Vary'] = 'Accept-Encoding';
+      fs.readFile(target, (readErr, data) => {
+        if (readErr) {
+          res.writeHead(404, { 'Content-Type': 'text/plain' });
+          res.end('Not Found');
+          return;
+        }
+        send(data, headers);
+      });
+      return;
+    }
+
+    // Compressible and client accepts an encoding: serve a precompressed
+    // variant (<file>.gz / <file>.br) when present, else compress on the
+    // fly with an mtime-keyed cache so repeats skip re-compression.
+    // 'gzip' encoding ↔ '.gz' on disk; 'br' ↔ '.br'.
+    const variant = target + (enc === 'br' ? '.br' : '.gz');
+    fs.stat(variant, (variantErr, variantStat) => {
+      if (!variantErr && variantStat.isFile()) {
+        fs.readFile(variant, (readErr, data) => {
+          if (readErr) {
+            res.writeHead(404, { 'Content-Type': 'text/plain' });
+            res.end('Not Found');
+            return;
+          }
+          send(data, {
+            ...baseHeaders,
+            'Vary': 'Accept-Encoding',
+            'Content-Encoding': enc,
+          });
+        });
         return;
       }
-      const ext = path.extname(target).toLowerCase();
-      res.writeHead(200, {
-        'Content-Type': MIME[ext] || 'application/octet-stream',
-        'Cache-Control':
-          ext === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable',
+
+      fs.stat(target, (targetErr, targetStat) => {
+        const mtimeMs = targetErr ? 0 : targetStat.mtimeMs;
+        const cacheKey = target + '\0' + enc;
+        const hit = COMPRESS_CACHE.get(cacheKey);
+        if (hit && hit.mtimeMs === mtimeMs) {
+          send(hit.body, {
+            ...baseHeaders,
+            'Vary': 'Accept-Encoding',
+            'Content-Encoding': enc,
+          });
+          return;
+        }
+
+        // Async zlib runs on the libuv threadpool, so a 19MB shiki chunk
+        // does not block the event loop. Brotli q4 ≈ gzip speed.
+        fs.readFile(target, (readErr, data) => {
+          if (readErr) {
+            res.writeHead(404, { 'Content-Type': 'text/plain' });
+            res.end('Not Found');
+            return;
+          }
+          const finish = (compressErr, body) => {
+            if (compressErr) {
+              // Compression failed: fall back to raw bytes (still Vary'd).
+              send(data, { ...baseHeaders, 'Vary': 'Accept-Encoding' });
+              return;
+            }
+            if (COMPRESS_CACHE.size >= COMPRESS_CACHE_MAX) {
+              COMPRESS_CACHE.delete(COMPRESS_CACHE.keys().next().value);
+            }
+            COMPRESS_CACHE.set(cacheKey, { mtimeMs, body });
+            send(body, {
+              ...baseHeaders,
+              'Vary': 'Accept-Encoding',
+              'Content-Encoding': enc,
+            });
+          };
+          if (enc === 'br') {
+            zlib.brotliCompress(
+              data,
+              { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 4 } },
+              finish
+            );
+          } else {
+            zlib.gzip(data, finish);
+          }
+        });
       });
-      if (req.method === 'HEAD') {
-        res.end();
-      } else {
-        res.end(data);
-      }
     });
   });
 }

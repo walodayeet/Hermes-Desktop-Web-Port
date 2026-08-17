@@ -14,3 +14,4 @@ dist/
 README.md
 ARCHITECTURE.md
 scripts/
+!scripts/precompress.mjs

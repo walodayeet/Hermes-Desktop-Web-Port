@@ -30,7 +30,8 @@ RUN npm ci
 # Build the renderer.
 COPY web/ web/
 COPY shared/ shared/
-RUN npm run build --workspace web
+COPY scripts/precompress.mjs scripts/precompress.mjs
+RUN npm run build --workspace web && node scripts/precompress.mjs
 
 # ---------- runtime ----------
 FROM node:22-bookworm-slim AS runtime
