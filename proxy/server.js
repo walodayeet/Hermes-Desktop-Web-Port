@@ -443,8 +443,32 @@ function serveStatic(req, res) {
 // Path is strictly validated: no traversal, single segment, exact filename.
 function servePluginsDoor(req, res) {
   const send = (status, obj) => {
-    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-    res.end(JSON.stringify(obj));
+    const body = Buffer.from(JSON.stringify(obj), 'utf8');
+    const headers = {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+    };
+    // Web port perf: plugin.js payloads are large JS-in-JSON (vietnamese-ui
+    // 188KB raw). Compress when the client accepts it — same zero-dep zlib
+    // approach as serveStatic, but only for the (potentially large) file
+    // response; list responses stay tiny and uncompressed.
+    const enc = acceptedEncoding(req.headers['accept-encoding']);
+    if (enc && body.length > 1024) {
+      try {
+        if (enc === 'br') {
+          res.writeHead(status, { ...headers, 'Content-Encoding': 'br', 'Vary': 'Accept-Encoding' });
+          res.end(zlib.brotliCompressSync(body, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 5 } }));
+        } else {
+          res.writeHead(status, { ...headers, 'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding' });
+          res.end(zlib.gzipSync(body, { level: 9 }));
+        }
+        return;
+      } catch {
+        // Fall through to uncompressed on compress failure.
+      }
+    }
+    res.writeHead(status, headers);
+    res.end(body);
   };
 
   let u;
