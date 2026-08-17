@@ -144,7 +144,7 @@ const callBilling = async <T>(
 }
 
 export const createBillingApi = (requestGateway: BillingRequestGateway): BillingApi => ({
-  charge: async (amountUsd, idempotencyKey = crypto.randomUUID()) => {
+  charge: async (amountUsd, idempotencyKey = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `chg-${Date.now().toString(36)}`) => { // Web port: randomUUID fallback for insecure contexts
     const result = await callBilling<BillingChargeResponse>(requestGateway, 'billing.charge', {
       amount_usd: amountUsd,
       idempotency_key: idempotencyKey

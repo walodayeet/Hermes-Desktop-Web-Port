@@ -22,7 +22,9 @@ const crypto = require('crypto');
 const PORT = Number(process.env.PORT) || 4000;
 const TARGET_RAW = process.env.HERMES_TARGET || '127.0.0.1:9119';
 
-const DIST = path.resolve(__dirname, '..', 'web', 'dist');
+// Serve the SPA bundle from web/dist by default; DIST_DIR overrides for
+// testing an alternate build (e.g. a gate-stripped diagnostic bundle).
+const DIST = process.env.DIST_DIR ? path.resolve(process.env.DIST_DIR) : path.resolve(__dirname, '..', 'web', 'dist');
 
 // Desktop-plugins door: the renderer's runtime plugin loader reads
 // `<hermes home>/desktop-plugins/<name>/plugin.js` off local disk in the

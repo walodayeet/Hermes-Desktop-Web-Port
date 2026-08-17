@@ -118,6 +118,46 @@ ${inner}
   }
 }
 
+// --- store/composer.ts: randomUUID fallback for insecure contexts --------------
+// crypto.randomUUID() only exists in SECURE contexts (https / localhost).
+// The web port is commonly served over plain http://<lan-ip>:4000, where it is
+// undefined — createComposerAttachmentOccurrenceId() then throws and EVERY
+// image paste/attach silently fails (the pill is never created). Fall back to
+// a collision-resistant local id. Marker-guarded; composer.ts is upstream-synced.
+patchFile(
+  'store/composer.ts',
+  'Web port: randomUUID fallback for insecure contexts',
+  'export const createComposerAttachmentOccurrenceId = (): string => crypto.randomUUID()',
+  `export const createComposerAttachmentOccurrenceId = (): string =>
+  // Web port: randomUUID fallback for insecure contexts — crypto.randomUUID()
+  // is secure-context-only; over plain http (LAN IP) it is undefined and every
+  // paste/attach throws before the pill is created. Fall back to a
+  // collision-resistant id.
+  typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : \`occ-\${Date.now().toString(36)}-\${Math.random().toString(36).slice(2, 10)}\``,
+)
+
+// --- app/settings/billing/api.ts: randomUUID default arg fallback -------------
+patchFile(
+  'app/settings/billing/api.ts',
+  'Web port: randomUUID fallback for insecure contexts',
+  'charge: async (amountUsd, idempotencyKey = crypto.randomUUID()) => {',
+  `charge: async (amountUsd, idempotencyKey = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : \`chg-\${Date.now().toString(36)}\`) => { // Web port: randomUUID fallback for insecure contexts`,
+)
+
+// --- store/pet-generate.ts: randomUUID fallback -------------------------------
+patchFile(
+  'store/pet-generate.ts',
+  'Web port: randomUUID fallback for insecure contexts',
+  'const cancelToken = crypto.randomUUID()',
+  `const cancelToken =
+    // Web port: randomUUID fallback for insecure contexts
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : \`pet-\${Date.now().toString(36)}-\${Math.random().toString(36).slice(2, 10)}\``,
+)
+
 // --- styles.css: iOS input floor -------------------------------------------------
 patchFile(
   'styles.css',

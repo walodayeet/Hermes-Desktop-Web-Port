@@ -37,7 +37,14 @@ export const $composerTerminalSelections = atom<Record<string, string>>({})
 export const $voiceConversationStartRequest = atom(0)
 let nextVoiceStartRequest = 0
 let handledVoiceStartRequest = 0
-export const createComposerAttachmentOccurrenceId = (): string => crypto.randomUUID()
+export const createComposerAttachmentOccurrenceId = (): string =>
+  // Web port: randomUUID fallback for insecure contexts — crypto.randomUUID()
+  // is secure-context-only; over plain http (LAN IP) it is undefined and every
+  // paste/attach throws before the pill is created. Fall back to a
+  // collision-resistant id.
+  typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `occ-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 
 export const requestVoiceConversationStart = (): void => $voiceConversationStartRequest.set(++nextVoiceStartRequest)
 

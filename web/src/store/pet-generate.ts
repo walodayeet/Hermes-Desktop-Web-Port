@@ -480,7 +480,11 @@ export async function hatchSelected(request: GatewayRequest, options: HatchOptio
   // Hatch cancellation rides its own token (not the draft token): hatching
   // mid-generation leaves pet.generate releasing that token, which would race
   // the arm. The draft token still locates the staged image server-side.
-  const cancelToken = crypto.randomUUID()
+  const cancelToken =
+    // Web port: randomUUID fallback for insecure contexts
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `pet-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
   const hatchRunId = hatch.begin()
   const controller = new AbortController()
   hatch.arm(() => {
