@@ -55,24 +55,6 @@ else
   DOCKER=""
 fi
 
-run_docker() { # run_docker <container> <cmd...> — exit-code-only; discards stdout
-  # Under `sg docker -c "..."` the wrapper masks docker exec's real exit code
-  # (we observed shell pipelines reporting failure for a run that succeeded).
-  # Exact status is captured INSIDE the container and echoed as a __RC= marker.
-  local rc out
-  if [ -n "$DOCKER" ]; then
-    out=$($DOCKER "docker exec $1 sh -c '${*:2} >/dev/null 2>&1; echo __RC=\$?'" 2>/dev/null)
-  else
-    out=$(docker exec "$1" sh -c "${*:2} >/dev/null 2>&1; echo __RC=\$?" 2>/dev/null)
-  fi
-  rc="${out##*__RC=}"
-  rc="${rc%%$'\n'*}"
-  case "$rc" in
-    ''|*[!0-9]*) return 1 ;;
-    *) [ "$rc" -eq 0 ] ;;
-  esac
-}
-
 docker_stdout() { # docker_stdout <container> <cmd...> — returns stdout, strips marker
   local out
   if [ -n "$DOCKER" ]; then
@@ -164,16 +146,22 @@ container_update() {
   fi
 
   status "${name}: hermes update -y"
-  if ! run_docker "$name" "cd /usr/local/lib/hermes-agent && hermes update -y 2>&1 | tail -30"; then
-    fail "${name}: hermes update failed"
-    FAILURES=$((FAILURES + 1))
-    return 1
-  fi
+  # The update reloads new code onto disk. Its exit code is unreliable under
+  # `sg docker -c` (the wrapper masks docker exec's real status, and piping
+  # through `tail` makes `$?` = tail's status = 0 on both success and failure),
+  # so treat the update as best-effort and let the before/after HEAD
+  # comparison below be the source of truth. Capture output for diagnostics.
+  local upd_out
+  upd_out=$(docker_stdout "$name" "cd /usr/local/lib/hermes-agent && bash -c 'set -o pipefail; hermes update -y 2>&1 | tail -30'")
+  printf '  %s\n' "$upd_out" | sed 's/^/    /'
 
   after=$(docker_stdout "$name" "cd /usr/local/lib/hermes-agent && git rev-parse HEAD")
   after="${after:-unknown}"
   if [ "$before" = "$after" ]; then
     warn "${name}: HEAD unchanged (${before:0:8}) — already current or no-op"
+    # No new code fetched — nothing to reload; still continue (restart is
+    # harmless but pointless, so return to skip it).
+    return 0
   else
     ok "${name}: ${before:0:8} → ${after:0:8}"
   fi
