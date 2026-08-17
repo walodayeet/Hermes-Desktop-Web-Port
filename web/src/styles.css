@@ -1495,7 +1495,6 @@ body.guest-pointer-lock :is(webview, iframe) {
   line-height: 1.45;
 }
 
-
 /* Web port (iOS): intro wordmark fit-text fails on Safari — .fit-text's
    tan(atan2()) + @property ratio math fails on iOS Safari (font stays at
    --fit-min, the wordmark overflows the screen and clips — "HERMES AGEN").

@@ -67,6 +67,7 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 const { McpTab, ToolsetConfigPanel } = sdk
 // Keep optional exports feature-detected; test harnesses may strip the SDK namespace.
 const SkillsView = typeof sdk === 'undefined' ? undefined : sdk.SkillsView
+const Streamdown = typeof sdk === 'undefined' ? undefined : sdk.Streamdown
 
 const ID = 'hermes-bots'
 const ROSTER_KEY = [ID, 'roster']
@@ -2481,7 +2482,12 @@ async function prepareBotSource(bot, pinnedChat) {
 }
 
 function displayName(bot, meta) {
-  if (bot?.sourceScoped && (bot.name || '').trim().toLowerCase() === 'default' && bot.connectionLabel) {
+  // Only THIN rows from another source trade the friendly name for their
+  // connection label — the active gateway's own default must keep reading
+  // "Hermes". Annotated active rows carry sourceScoped too, and keying this
+  // off sourceScoped renamed the user's main agent to an IP-derived label
+  // (community report, Aug 17 2026).
+  if (bot?.remoteSource && (bot.name || '').trim().toLowerCase() === 'default' && bot.connectionLabel) {
     return bot.connectionLabel
   }
 
@@ -6491,8 +6497,8 @@ function GroupChatWorkspace({ group, members }) {
                         ]
                       }),
                       jsx('div', {
-                        className: 'whitespace-pre-wrap text-xs text-(--ui-text-secondary)',
-                        children: entry.text
+                        className: 'text-xs text-(--ui-text-secondary) [&_p]:mb-1 [&_p:last-child]:mb-0',
+                        children: Streamdown ? jsx(Streamdown, { children: entry.text }) : entry.text
                       })
                     ]
                   }, `${entry.at}:${index}`)
