@@ -28,6 +28,8 @@ import {
 import { ContribBoundary, ContribRender } from '@/contrib/react/boundary'
 import { useContributions } from '@/contrib/react/use-contributions'
 import { useI18n } from '@/i18n'
+// Web port (mobile): mobile tab strip — useIsMobile import
+import { useIsMobile } from '@/hooks/use-mobile'
 import { cn } from '@/lib/utils'
 
 import { $layoutEditMode } from '../../edit-mode'
@@ -258,7 +260,13 @@ export function TreeGroup({
   // (tabs reading top-to-bottom). In a column (stacked zones) the horizontal
   // header IS the collapsed form, exactly as before.
   const verticalCollapse = Boolean(node.minimized) && parentAxis === 'row' && !isEmpty
-  const headerVisible = !isEmpty && !verticalCollapse && (Boolean(node.minimized) || !headerHidden)
+  // Web port (mobile): a lone session tab auto-hides the strip upstream,
+  // stranding the tab (no hold/close affordance on touch). Keep the strip
+  // whenever this zone holds a session tab and the user didn't explicitly
+  // hide it (node.headerHidden === true stays respected).
+  const isMobile = useIsMobile()
+  const mobileForceStrip = isMobile && !node.headerHidden && shown.some(isSessionStripPane)
+  const headerVisible = !isEmpty && !verticalCollapse && (Boolean(node.minimized) || !headerHidden || mobileForceStrip)
 
   // Keep the activated tab — and, on the last one, the trailing "+" — inside
   // the strip's scroll window. Opening a tab past the right edge otherwise

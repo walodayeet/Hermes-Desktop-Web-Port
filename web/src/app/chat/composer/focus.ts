@@ -69,9 +69,6 @@ const cssEscape = (value: string): string => {
 interface SubmitDetail {
   target: ComposerTarget
   text: string
-  /** `hidden` types the persisted user row so no bubble renders — the
-   *  off-screen path for widget intents. Omit for normal visible sends. */
-  displayKind?: 'hidden'
 }
 
 let activeTarget: ComposerTarget = 'main'
@@ -264,16 +261,12 @@ export const onComposerInsertRefsRequest = (handler: (detail: InsertRefsDetail) 
  * the agent a task without the user round-tripping through the input. */
 export const requestComposerSubmit = (
   text: string,
-  { target = 'active', displayKind }: { target?: ComposerTarget | 'active'; displayKind?: 'hidden' } = {}
+  { target = 'active' }: { target?: ComposerTarget | 'active' } = {}
 ) => {
   const trimmed = text.trim()
 
   if (trimmed) {
-    dispatch<SubmitDetail>(SUBMIT_EVENT, {
-      target: resolve(target),
-      text: trimmed,
-      ...(displayKind ? { displayKind } : {})
-    })
+    dispatch<SubmitDetail>(SUBMIT_EVENT, { target: resolve(target), text: trimmed })
   }
 }
 

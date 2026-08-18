@@ -245,6 +245,13 @@ patchFile(
   [data-slot='statusbar'] > div::-webkit-scrollbar {
     display: none;
   }
+  /* Web port (mobile): iOS long-press on a session tab must open the close
+     menu (Radix ContextMenu). Safari's native touch-callout swallows
+     contextmenu, so kill the callout on tab strips. */
+  [data-zone-tabstrip] [role='tab'],
+  [data-tree-tab] {
+    -webkit-touch-callout: none;
+  }
 }`,
 )
 
@@ -423,10 +430,38 @@ patchFile(
     },`,
 )
 
-// --- lib/chat-runtime.ts + use-prompt-actions/utils.ts: real filenames for web-input paths -----
-// The bridge exposes fileNameForPath (web-input:<n> -> File.name). These two
-// synced helpers must consult it so chips/refs and attach_bytes/uploads carry
-// the original filename+extension instead of the opaque "web-input:N".
+// --- tree-group.tsx: mobile tab strip visibility -------------------------------
+// Upstream hides the header strip for a lone tab (shown.length <= 1) and for
+// full-page views (headerVeto). On desktop that's fine — ⌘W / right-click
+// close still work. On a phone the hidden strip strands the tab: there is
+// nothing to hold, so a session's tab is unreachable and can block the view.
+// Force the strip visible on mobile whenever the zone holds a session tab
+// and the user has NOT explicitly hidden it (node.headerHidden === true is
+// a deliberate hide — respect it; the auto-hide is the trap).
+patchFile(
+  'components/pane-shell/tree/renderer/tree-group.tsx',
+  '// Web port (mobile): mobile tab strip — useIsMobile import',
+  "import { useI18n } from '@/i18n'",
+  `import { useI18n } from '@/i18n'
+// Web port (mobile): mobile tab strip — useIsMobile import
+import { useIsMobile } from '@/hooks/use-mobile'`,
+)
+patchFile(
+  'components/pane-shell/tree/renderer/tree-group.tsx',
+  "// Web port (mobile): keep the strip when the zone holds a session tab",
+  'const headerVisible = !isEmpty && !verticalCollapse && (Boolean(node.minimized) || !headerHidden)',
+  `// Web port (mobile): a lone session tab auto-hides the strip upstream,
+  // stranding the tab (no hold/close affordance on touch). Keep the strip
+  // whenever this zone holds a session tab and the user didn't explicitly
+  // hide it (node.headerHidden === true stays respected).
+  const isMobile = useIsMobile()
+  const mobileForceStrip = isMobile && !node.headerHidden && shown.some(isSessionStripPane)
+  const headerVisible = !isEmpty && !verticalCollapse && (Boolean(node.minimized) || !headerHidden || mobileForceStrip)`,
+)
+// iOS long-press on a tab must open the close menu. Safari's native
+// touch-callout swallows contextmenu — the CSS patch below (styles.css,
+// same block as the mobile 16px floor) kills the callout on tab strips so
+// the Radix ContextMenu wrapping each zone can receive the long-press.
 patchFile(
   'lib/chat-runtime.ts',
   '// Web port: virtual web-input:<n> paths carry the real filename in the',
@@ -452,6 +487,50 @@ patchFile(
     const real = window.hermesDesktop?.fileNameForPath?.(filePath)
     if (real) return real
   }`,
+)
+// --- components/ui/pane-tab.tsx: touch long-press opens the close menu --------
+// On desktop a tab's close menu opens on right-click (Radix ContextMenu wraps
+// the zone). A phone has no right-click; iOS long-press sometimes delivers
+// contextmenu but is unreliable. Synthesize it: a 450ms touch hold on a tab
+// dispatches a real contextmenu MouseEvent at the press point, which the
+// wrapping ContextMenuTrigger receives and opens. Guarded by pointerType so
+// mouse users get nothing new.
+patchFile(
+  'components/ui/pane-tab.tsx',
+  '// Web port (mobile): touch long-press opens the tab close menu',
+  '      onPointerDown={event => {\n        middle.onPointerDown(event)',
+  `      onPointerDown={event => {
+        middle.onPointerDown(event)
+
+        // Web port (mobile): touch long-press opens the tab close menu.
+        // A 450ms hold dispatches a synthetic contextmenu the wrapping
+        // ContextMenuTrigger picks up — iOS long-press alone is unreliable.
+        if (event.pointerType === 'touch') {
+          const target = event.currentTarget
+          const startX = event.clientX
+          const startY = event.clientY
+          const timer = window.setTimeout(() => {
+            target.dispatchEvent(
+              new MouseEvent('contextmenu', {
+                bubbles: true,
+                cancelable: true,
+                clientX: startX,
+                clientY: startY,
+                view: window
+              })
+            )
+          }, 450)
+          const clear = () => window.clearTimeout(timer)
+          const onMove = (move: PointerEvent) => {
+            // Cancel the hold once the finger travels — a drag, not a press.
+            if (Math.hypot(move.clientX - startX, move.clientY - startY) > 10) {
+              clear()
+            }
+          }
+          target.addEventListener('pointerup', clear, { once: true })
+          target.addEventListener('pointercancel', clear, { once: true })
+          target.addEventListener('pointermove', onMove)
+        }`,
 )
 patchFile(
   'components/ui/copy-button.tsx',

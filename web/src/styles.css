@@ -35,6 +35,13 @@
   [data-slot='statusbar'] > div::-webkit-scrollbar {
     display: none;
   }
+  /* Web port (mobile): iOS long-press on a session tab must open the close
+     menu (Radix ContextMenu). Safari's native touch-callout swallows
+     contextmenu, so kill the callout on tab strips. */
+  [data-zone-tabstrip] [role='tab'],
+  [data-tree-tab] {
+    -webkit-touch-callout: none;
+  }
 }
 
 /* Web port (iOS): Safari auto-zooms into any form field whose font-size is

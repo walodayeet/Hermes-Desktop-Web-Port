@@ -119,6 +119,36 @@ export const PaneTab = React.forwardRef<HTMLDivElement, PaneTabProps>(function P
       onPointerDown={event => {
         middle.onPointerDown(event)
 
+        // Web port (mobile): touch long-press opens the tab close menu.
+        // A 450ms hold dispatches a synthetic contextmenu the wrapping
+        // ContextMenuTrigger picks up — iOS long-press alone is unreliable.
+        if (event.pointerType === 'touch') {
+          const target = event.currentTarget
+          const startX = event.clientX
+          const startY = event.clientY
+          const timer = window.setTimeout(() => {
+            target.dispatchEvent(
+              new MouseEvent('contextmenu', {
+                bubbles: true,
+                cancelable: true,
+                clientX: startX,
+                clientY: startY,
+                view: window
+              })
+            )
+          }, 450)
+          const clear = () => window.clearTimeout(timer)
+          const onMove = (move: PointerEvent) => {
+            // Cancel the hold once the finger travels — a drag, not a press.
+            if (Math.hypot(move.clientX - startX, move.clientY - startY) > 10) {
+              clear()
+            }
+          }
+          target.addEventListener('pointerup', clear, { once: true })
+          target.addEventListener('pointercancel', clear, { once: true })
+          target.addEventListener('pointermove', onMove)
+        }
+
         // ⌘-click closes. Preempt here — the tab strips activate/drag on
         // pointerdown (drag-session onTap), so we must claim the press before
         // the shell's own handler starts a drag, and skip it entirely.
