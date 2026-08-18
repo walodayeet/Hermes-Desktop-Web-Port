@@ -42,6 +42,9 @@
       ],
       "@hermes/shared/skin": [
         "../shared/src/skin.ts"
+      ],
+      "@hermes/shared/translucency": [
+        "../shared/src/translucency.ts"
       ]
     },
     "noEmit": true

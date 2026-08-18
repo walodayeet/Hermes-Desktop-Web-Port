@@ -149,6 +149,7 @@ export default defineConfig(({ command }) => ({
       '@hermes/shared/billing-policy': path.resolve(__dirname, '../shared/src/billing-policy.ts'),
       '@hermes/shared/charge-settlement': path.resolve(__dirname, '../shared/src/charge-settlement.ts'),
       '@hermes/shared/skin': path.resolve(__dirname, '../shared/src/skin.ts'),
+      '@hermes/shared/translucency': path.resolve(__dirname, '../shared/src/translucency.ts'),
       '@hermes/shared': path.resolve(__dirname, '../shared/src'),
       react: path.resolve(__dirname, 'node_modules/react'),
       'react-dom': path.resolve(__dirname, 'node_modules/react-dom'),
