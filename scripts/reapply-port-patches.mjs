@@ -255,6 +255,44 @@ patchFile(
 }`,
 )
 
+// --- styles.css: mobile touch targets (44px floor) --------------------------
+// Apple HIG: interactive elements need ~44px; the desktop chrome (composer
+// controls 1.5rem, statusbar ~11px text + 6px padding) is ~24-28px even after
+// the 18px root bump in the statusbar-scroll patch. Enlarge interactive
+// controls only — labels/passive text keep design sizes. This is its OWN
+// patchFile (separate marker) so it can't be swallowed by the statusbar-scroll
+// patch's `already patched` guard.
+patchFile(
+  'styles.css',
+  'Web port (mobile): touch targets 44px floor',
+  `  [data-zone-tabstrip] [role='tab'],
+  [data-tree-tab] {
+    -webkit-touch-callout: none;
+  }
+}`,
+  `  [data-zone-tabstrip] [role='tab'],
+  [data-tree-tab] {
+    -webkit-touch-callout: none;
+  }
+  /* Web port (mobile): touch targets — Apple HIG floor is 44px; the desktop
+     chrome (composer controls 1.5rem, statusbar actions ~11px text + 6px
+     padding) is 24–28px even after the 18px root bump. Enlarge the
+     interactive controls only; labels/passive text keep design sizes. */
+  :root {
+    --composer-control-size: 2.25rem;
+    --composer-control-primary-size: 2.5rem;
+    --composer-surface-pad-y: 0.5rem;
+  }
+  [data-slot='composer-root'] button,
+  [data-slot='composer-dock'] button,
+  [data-slot='statusbar'] button,
+  [data-slot='statusbar'] a {
+    min-height: 2.75rem;
+    min-width: 2.75rem;
+  }
+}`,
+)
+
 // --- styles.css: safe-area vars ----------------------------------------------------
 patchFile(
   'styles.css',
