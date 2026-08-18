@@ -488,6 +488,51 @@ patchFile(
     if (real) return real
   }`,
 )
+// --- plugins/hermes-bots/plugin.js: collapsible panes on mobile -----------------
+// Root cause of "web port opens the BOTS tab on every iOS reload" + "a tab
+// blocking my view": the Bots pane (placement left, docked under sessions) and
+// the Cronjobs pane (placement main, docked right of workspace) are NOT
+// `collapsible`, so on a narrow viewport (<768px, i.e. every phone) they stay
+// as persistent grid columns — Bots eats ~155px and Cronjobs ~149px, squeezing
+// the chat lane to ~86px, and the docked Bots pane fronts on boot. Core panes
+// (sessions/files/review/terminal) all declare `collapsible: true`, which makes
+// them LEAVE the grid on narrow viewports and become exclusive edge-overlay
+// drawers (opened on demand) — the exact mobile behavior we want. Grant Bots +
+// Cronjobs the same flag so a phone boots to the chat, and surfacing Bots or
+// the routine list is an explicit tap, not an autopen.
+patchFile(
+  'plugins/hermes-bots/plugin.js',
+  '// Web port (mobile): Bots pane collapsible → drawer overlay, not a column',
+  "      data: { placement: 'left', width: '260px', dock: { pane: 'sessions', pos: 'bottom' } },",
+  `      data: {
+        placement: 'left',
+        width: '260px',
+        dock: { pane: 'sessions', pos: 'bottom' },
+        // Web port (mobile): collapsible so a phone boots to the chat — Bots
+        // leaves the grid under 768px and becomes an edge-overlay drawer an
+        // explicit tap opens, instead of a 155px column that auto-fronts and
+        // blocks the chat on every reload.
+        collapsible: true
+      },`,
+)
+patchFile(
+  'plugins/hermes-bots/plugin.js',
+  '// Web port (mobile): Cronjobs pane collapsible → drawer overlay, not a column',
+  `      data: {
+        placement: 'main',
+        dock: { pane: 'workspace', pos: 'right' },
+        width: '250px'
+      },`,
+  `      data: {
+        placement: 'main',
+        dock: { pane: 'workspace', pos: 'right' },
+        width: '250px',
+        // Web port (mobile): collapsible so the Cronjobs list doesn't hold a
+        // 149px column on a phone; it becomes a right-edge drawer.
+        collapsible: true
+      },`,
+)
+
 // --- components/ui/pane-tab.tsx: touch long-press opens the close menu --------
 // On desktop a tab's close menu opens on right-click (Radix ContextMenu wraps
 // the zone). A phone has no right-click; iOS long-press sometimes delivers

@@ -7109,7 +7109,16 @@ export default {
       // default the user never changed), the sessions pane vanishes behind
       // the Bots tab with no visible strip to switch back. Splitting below
       // the sessions pane keeps both surfaces visible instead.
-      data: { placement: 'left', width: '260px', dock: { pane: 'sessions', pos: 'bottom' } },
+      data: {
+        placement: 'left',
+        width: '260px',
+        dock: { pane: 'sessions', pos: 'bottom' },
+        // Web port (mobile): collapsible so a phone boots to the chat — Bots
+        // leaves the grid under 768px and becomes an edge-overlay drawer an
+        // explicit tap opens, instead of a 155px column that auto-fronts and
+        // blocks the chat on every reload.
+        collapsible: true
+      },
       render: () => jsx(BotsPane, {})
     })
 
@@ -7123,7 +7132,10 @@ export default {
       data: {
         placement: 'main',
         dock: { pane: 'workspace', pos: 'right' },
-        width: '250px'
+        width: '250px',
+        // Web port (mobile): collapsible so the Cronjobs list doesn't hold a
+        // 149px column on a phone; it becomes a right-edge drawer.
+        collapsible: true
       },
       render: () => jsx(RoutinesPane, {})
     })
