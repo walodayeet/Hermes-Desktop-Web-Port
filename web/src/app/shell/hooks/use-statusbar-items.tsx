@@ -411,40 +411,11 @@ export function useStatusbarItems({
     }
   }, [connection?.mode, connection?.remoteHost, connection?.remoteKind, copy])
 
+  // Web port (mobile): statusbar trimmed to plugins/context/folder.
+  // Everything except the current-folder chip is hidden (plugins arrive via
+  // extraRightItems and the context meter survives in the right array).
   const coreLeftStatusbarItems = useMemo<readonly StatusbarItem[]>(
     () => [
-      ...(connectionItem ? [connectionItem] : []),
-      {
-        className: `w-7 justify-center px-0${commandCenterOpen ? ' bg-accent/55 text-foreground' : ''}`,
-        icon: <Command className="size-3.5" />,
-        id: 'command-center',
-        // The system icon: the way into every other surface, including the
-        // settings that would bring a hidden item back. Never hideable.
-        lockedVisible: true,
-        onSelect: toggleCommandCenter,
-        title: commandCenterOpen ? copy.closeCommandCenter : copy.openCommandCenter,
-        toggleLabel: copy.toggleCommandCenter,
-        variant: 'action'
-      },
-      {
-        className: gatewayRestarting ? undefined : gatewayClassName,
-        detail: gatewayRestarting ? copy.gatewayRestarting : gatewayDetail,
-        icon: gatewayRestarting ? (
-          <GlyphSpinner ariaLabel={copy.gatewayRestarting} className="size-3" />
-        ) : inferenceReady ? (
-          <Activity className="size-3" />
-        ) : (
-          <AlertCircle className="size-3" />
-        ),
-        id: 'gateway-health',
-        label: copy.gateway,
-        menuClassName: 'w-72',
-        menuContent: gatewayMenuContent,
-        // Tip only when there's a real status reason — not "gateway status" restating the label.
-        title: inferenceStatus?.reason || undefined,
-        toggleLabel: copy.gateway,
-        variant: 'menu'
-      },
       {
         hidden: !currentCwd,
         icon: <FolderOpen className="size-3" />,
@@ -545,17 +516,10 @@ export function useStatusbarItems({
     ]
   )
 
+  // Web port (mobile): statusbar right — only the context meter survives;
+  // timers/approval/terminal/version are hidden (plugins come via extraRightItems).
   const coreRightStatusbarItems = useMemo<readonly StatusbarItem[]>(
     () => [
-      {
-        detail: <LiveDuration since={turnStartedAt} />,
-        hidden: !busy || !turnStartedAt,
-        icon: <Loader2 className="size-3 animate-spin" />,
-        id: 'running-timer',
-        label: copy.turnRunning,
-        toggleLabel: copy.toggleRunningTimer,
-        variant: 'text'
-      },
       {
         detail: contextBar || undefined,
         hidden: !contextUsage,

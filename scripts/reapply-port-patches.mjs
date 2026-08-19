@@ -308,11 +308,18 @@ patchFile(
 )
 
 // --- styles.css: composer bottom inset uses safe area ------------------------------
+// Web port (iOS): the composer dock's bottom pad adds the home-indicator inset
+// (--safe-area-bottom). The statusbar footer below ALREADY carries that inset
+// (pb-[var(--safe-area-bottom)]), so adding it here too double-counts → a dead
+// band between the composer and the statusbar on phones. The web port pins the
+// composer pad to the plain 0.625rem; the statusbar owns the safe area.
+// ONE idempotent patch: the marker is the comment the insert writes, and the
+// find anchor is the pre-patch upstream line, so it applies exactly once.
 patchFile(
   'styles.css',
+  'Web port (mobile): composer pad — statusbar owns the safe-area inset',
   '--composer-shell-pad-block-end: calc(0.625rem + var(--safe-area-bottom, 0px));',
-  '--composer-shell-pad-block-end: 0.625rem;',
-  '--composer-shell-pad-block-end: calc(0.625rem + var(--safe-area-bottom, 0px));',
+  `--composer-shell-pad-block-end: 0.625rem; /* Web port (mobile): composer pad — statusbar owns the safe-area inset */`,
 )
 
 // --- titlebar.ts: safe-area top ------------------------------------------------------
@@ -439,6 +446,41 @@ patchFile(
   '}, [plugin, text])',
 )
 
+// --- titlebar-controls.tsx: hide the right-sidebar toggle on mobile --------
+// The `right-sidebar` titlebar button toggles the FILES pane, which is
+// `collapsible: true` — it leaves the grid on narrow viewports and becomes an
+// edge-overlay drawer. On a phone the button therefore has nothing to open
+// (the pane is collapsed by default) and reads as a dead button. Hide it
+// under 768px; desktop keeps the toggle.
+patchFile(
+  'app/shell/titlebar-controls.tsx',
+  'Web port (mobile): hide dead right-sidebar toggle',
+  `  const rightSidebarTool: TitlebarTool = {
+    actionId: 'view.toggleRightSidebar',
+    icon: <TitlebarIcon name="layout-sidebar-right" />,
+    id: 'right-sidebar',
+    label: rightEdge.open ? t.titlebar.hideRightSidebar : t.titlebar.showRightSidebar,
+    onSelect: () => {
+      triggerHaptic('tap')
+      rightEdge.toggle()
+    }
+  }`,
+  `  const rightSidebarTool: TitlebarTool = {
+    actionId: 'view.toggleRightSidebar',
+    icon: <TitlebarIcon name="layout-sidebar-right" />,
+    id: 'right-sidebar',
+    // Web port (mobile): the FILES pane is collapsible and leaves the grid
+    // under 768px, so this toggle has nothing to open on a phone — hide it
+    // there (desktop keeps it).
+    className: 'hidden md:inline-flex',
+    label: rightEdge.open ? t.titlebar.hideRightSidebar : t.titlebar.showRightSidebar,
+    onSelect: () => {
+      triggerHaptic('tap')
+      rightEdge.toggle()
+    }
+  }`,
+)
+
 // --- titlebar-controls.tsx: mobile command-palette button --------------------------
 patchFile(
   'app/shell/titlebar-controls.tsx',
@@ -465,6 +507,113 @@ patchFile(
         openCommandPalette()
       }
     },`,
+)
+
+// --- use-statusbar-items.tsx: trim statusbar to plugins + context + folder --
+// Web-port phone layout: the statusbar is a fixed 20px strip; every extra
+// item crowds the few that matter. User asked for ONLY: plugin contributions,
+// the context meter, and the current folder. Remove the command-center,
+// gateway-health, agents/cron/webhooks route shortcuts, timers, approval
+// mode, terminal toggle, and version pills. Plugins arrive via
+// extraRightItems (they're not in these core arrays), so they survive.
+// ONE whole-array replacement, marker-guarded at the top of each array (the
+// marker is the comment the insert writes, so a re-run skips — no double
+// application like per-item patches would).
+patchFile(
+  'app/shell/hooks/use-statusbar-items.tsx',
+  'Web port (mobile): statusbar trimmed to plugins/context/folder',
+  `  const coreLeftStatusbarItems = useMemo<readonly StatusbarItem[]>(
+    () => [
+      ...(connectionItem ? [connectionItem] : []),
+      {
+        className: \`w-7 justify-center px-0\${commandCenterOpen ? ' bg-accent/55 text-foreground' : ''}\`,
+        icon: <Command className="size-3.5" />,
+        id: 'command-center',
+        // The system icon: the way into every other surface, including the
+        // settings that would bring a hidden item back. Never hideable.
+        lockedVisible: true,
+        onSelect: toggleCommandCenter,
+        title: commandCenterOpen ? copy.closeCommandCenter : copy.openCommandCenter,
+        toggleLabel: copy.toggleCommandCenter,
+        variant: 'action'
+      },
+      {
+        className: gatewayRestarting ? undefined : gatewayClassName,
+        detail: gatewayRestarting ? copy.gatewayRestarting : gatewayDetail,
+        icon: gatewayRestarting ? (
+          <GlyphSpinner ariaLabel={copy.gatewayRestarting} className="size-3" />
+        ) : inferenceReady ? (
+          <Activity className="size-3" />
+        ) : (
+          <AlertCircle className="size-3" />
+        ),
+        id: 'gateway-health',
+        label: copy.gateway,
+        menuClassName: 'w-72',
+        menuContent: gatewayMenuContent,
+        // Tip only when there's a real status reason — not "gateway status" restating the label.
+        title: inferenceStatus?.reason || undefined,
+        toggleLabel: copy.gateway,
+        variant: 'menu'
+      },
+      {
+        hidden: !currentCwd,
+        icon: <FolderOpen className="size-3" />,
+        id: 'workspace-cwd',`,
+  `  // Web port (mobile): statusbar trimmed to plugins/context/folder.
+  // Everything except the current-folder chip is hidden (plugins arrive via
+  // extraRightItems and the context meter survives in the right array).
+  const coreLeftStatusbarItems = useMemo<readonly StatusbarItem[]>(
+    () => [
+      {
+        hidden: !currentCwd,
+        icon: <FolderOpen className="size-3" />,
+        id: 'workspace-cwd',`,
+)
+patchFile(
+  'app/shell/hooks/use-statusbar-items.tsx',
+  'Web port (mobile): statusbar right — only context survives',
+  `  const coreRightStatusbarItems = useMemo<readonly StatusbarItem[]>(
+    () => [
+      {
+        detail: <LiveDuration since={turnStartedAt} />,
+        hidden: !busy || !turnStartedAt,
+        icon: <Loader2 className="size-3 animate-spin" />,
+        id: 'running-timer',
+        label: copy.turnRunning,
+        toggleLabel: copy.toggleRunningTimer,
+        variant: 'text'
+      },
+      {
+        detail: contextBar || undefined,
+        hidden: !contextUsage,
+        id: 'context-usage',
+        label: contextUsage,
+        menuAlign: 'end',
+        menuClassName: 'w-auto border-(--ui-stroke-secondary) p-0',
+        menuContent: (
+          <ContextUsagePanel breakdown={contextBreakdown} loading={contextBreakdownLoading} usage={gaugeUsage} />
+        ),
+        toggleLabel: copy.toggleContextUsage,
+        variant: 'menu'
+      },`,
+  `  // Web port (mobile): statusbar right — only the context meter survives;
+  // timers/approval/terminal/version are hidden (plugins come via extraRightItems).
+  const coreRightStatusbarItems = useMemo<readonly StatusbarItem[]>(
+    () => [
+      {
+        detail: contextBar || undefined,
+        hidden: !contextUsage,
+        id: 'context-usage',
+        label: contextUsage,
+        menuAlign: 'end',
+        menuClassName: 'w-auto border-(--ui-stroke-secondary) p-0',
+        menuContent: (
+          <ContextUsagePanel breakdown={contextBreakdown} loading={contextBreakdownLoading} usage={gaugeUsage} />
+        ),
+        toggleLabel: copy.toggleContextUsage,
+        variant: 'menu'
+      },`,
 )
 
 // --- tree-group.tsx: mobile tab strip visibility -------------------------------

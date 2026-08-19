@@ -20,6 +20,7 @@
 
 import { onPersistenceEvent, readKey, writeKey } from './storage'
 import { refreshPluginDecisions } from '@/contrib/plugins-store'
+import { discoverRuntimePlugins } from '@/contrib/runtime-loader'
 import { refreshUserThemes } from '@/themes/user-themes'
 
 /**
@@ -36,6 +37,11 @@ const SYNCED_KEYS: ReadonlySet<string> = new Set([
   // Plugin enable/disable decisions.
   'hermes.desktop.pluginDecisions.v2',
   'hermes.desktop.disabledPlugins.v1',
+  // Disk-plugin own-state (e.g. Vietnamese UI's on/off chip) — plugin scoped
+  // keys use the `hermes.plugin.<id>.` prefix via ctx.storage; legacy disk
+  // plugins that predate ctx.storage use their own bare keys. Sync them too
+  // so a toggle on one device sticks on the next.
+  'hermes.vietnamese-ui.enabled',
   // User-installed themes (incl. marketplace installs).
   'hermes-desktop-user-themes-v1',
 ])
@@ -81,7 +87,15 @@ export async function hydrateServerSettings(): Promise<void> {
   // The atoms init at module scope from localStorage (pre-hydration); refresh
   // them so server values apply on first paint without a reload.
   if (touchedThemes) refreshUserThemes()
-  if (touchedPlugins) refreshPluginDecisions()
+  if (touchedPlugins) {
+    refreshPluginDecisions()
+    // Web port: disk plugins (e.g. Vietnamese UI) read their decisions at
+    // MODULE scope during the pre-hydration scan, so a server-synced toggle
+    // from another device was invisible until the next reload. Re-scan the
+    // disk door now that the atom holds the hydrated truth — the loader
+    // re-evaluates each plugin against the new decisions.
+    void discoverRuntimePlugins().catch(() => undefined)
+  }
   // Self-heal: mirror the merged local state (server wins for conflicts, but
   // keys that only exist locally — e.g. a theme installed before the sync
   // shipped — get pushed so a fresh device sees them too).

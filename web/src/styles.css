@@ -518,7 +518,7 @@ select,
        This is the default; each chat surface re-declares the calc against its own measurement (see below). */
     --thread-last-message-clearance: calc(var(--composer-measured-height) + 2rem);
 
-    --composer-shell-pad-block-end: calc(0.625rem + var(--safe-area-bottom, 0px));
+    --composer-shell-pad-block-end: 0.625rem; /* Web port (mobile): composer pad — statusbar owns the safe-area inset */
     --message-text-indent: 0.75rem;
     --conversation-text-font-size: 0.8125rem;
     --conversation-tool-font-size: 0.6875rem;
