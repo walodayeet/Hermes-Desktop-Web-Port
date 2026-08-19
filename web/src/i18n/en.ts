@@ -52,6 +52,9 @@ export const en: Translations = {
     revealInSidebar: 'Reveal in filetree',
     copyPath: 'Copy Path',
     copyRelativePath: 'Copy Relative Path',
+    download: 'Download',
+    downloadSaved: 'Saved',
+    downloadFailed: 'Download failed',
     rename: 'Rename…',
     delete: 'Delete',
     renameTitle: 'Rename',
@@ -392,6 +395,39 @@ export const en: Translations = {
         toggleFailed: (name: string) => `Could not toggle ${name}`,
         updateBackendToManage: 'Update the Hermes backend to manage this plugin from Desktop.',
         sources: { bundled: 'bundled', user: 'user', git: 'git', project: 'project', entrypoint: 'pip' }
+      },
+      installModal: {
+        title: 'Install plugin',
+        description: 'Review what this repository contains before installing anything.',
+        repoLabel: 'Repository',
+        includesHeading: 'This package includes',
+        agentLabel: 'Agent plugin',
+        desktopLabel: 'Desktop UI',
+        agentTargetLocal: profile => `Installs into the ${profile} backend (~/.hermes/plugins/)`,
+        agentTargetRemote: profile => `Installs into the connected ${profile} backend`,
+        desktopTarget: "Installs into this app's local desktop-plugins folder",
+        desktopOnlyNote: 'Desktop-only packages do not install a backend agent plugin.',
+        insecureWarning: 'This URL uses an insecure or local scheme. Prefer https:// or git@ for production installs.',
+        securityHeading: 'Before you install',
+        securityIntro:
+          'Install only from sources you trust — review the repository below if you want to see what will be added.',
+        sourceHeading: 'Source code',
+        viewRepository: 'View repository',
+        viewPluginFiles: 'View plugin files',
+        gitCloneLabel: 'Git clone URL',
+        enableAgent: 'Enable agent plugin after install',
+        forceReinstall: 'Force reinstall (replace if already installed)',
+        install: 'Install',
+        installing: 'Installing…',
+        probing: 'Inspecting repository…',
+        probeUnavailable: 'Plugin inspection is unavailable in this environment.',
+        desktopUnavailable: 'Desktop plugin install is unavailable in this environment.',
+        selectComponent: 'Select at least one component to install.',
+        agentSuccess: name => `Agent plugin ${name} installed`,
+        desktopSuccess: name => `Desktop plugin ${name} installed`,
+        agentFailed: 'Agent plugin install failed',
+        desktopFailed: 'Desktop plugin install failed',
+        missingEnv: vars => `Missing env vars: ${vars}. Add them in Settings → Keys.`
       }
     },
     notifications: {
@@ -486,11 +522,12 @@ export const en: Translations = {
       terminalFontPreview: 'Glyph preview',
       terminalFontReset: 'Use default',
       translucencyTitle: 'Window Translucency',
-      translucencyDesc: 'See your desktop through the whole window. macOS and Windows only.',
-      translucencyGlassDesc:
-        'Matte glass: the desktop shows through as a smooth blur while text stays sharp. macOS only.',
+      translucencyDesc: 'See your desktop through the whole window, text and all.',
+      translucencyGlassDesc: 'Matte glass: the desktop shows through as a smooth blur while text stays sharp.',
       translucencyModeClear: 'Clear',
       translucencyModeGlass: 'Glass',
+      translucencyTintTitle: 'Tint',
+      translucencyFadeTitle: 'Fade',
       translucencyFrostTitle: 'Frost',
       translucencyFrost: {
         'under-window': 'Deep',
@@ -505,6 +542,8 @@ export const en: Translations = {
       },
       backdropTitle: 'Chat Backdrop',
       backdropDesc: 'The faint statue image behind the conversation.',
+      introSplashTitle: 'Intro Splash',
+      introSplashDesc: 'The wordmark and prompt shown on an empty chat.',
       reactionsTitle: 'Message Reactions',
       reactionsDesc: 'iMessage-style emoji tapbacks — react to messages, and Hermes can react to yours.',
       composerPopoutTitle: 'Floating Composer',
@@ -666,16 +705,20 @@ export const en: Translations = {
       set: 'Set',
       clear: 'Clear'
     },
-    // v2 multi-connection registry: Settings → Connections.
+    // v2 multi-connection registry: Settings → Gateways.
     connections: {
-      title: 'Connections',
-      intro:
-        'Register every place your agents live — this device, remote gateways on your network, and Hermes Cloud instances. All of them are stored here.',
+      title: 'Registered gateways',
+      intro: 'Manage this device and every Hermes gateway it can reach through remote, SSH, or Cloud connections.',
       stagedNote:
-        'Chats and the agent roster follow the source you pick; the app-managed window backend is still chosen in Settings → Gateway.',
+        'Switch gateways from Sessions. Profiles, chats, messaging, and cron jobs stay with their gateway; work on other gateways keeps running.',
+      launchModeTitle: 'At startup, return to Sessions on the last-used gateway',
+      launchModeDesc: 'When off, Sessions opens on the Primary gateway.',
+      searchPlaceholder: 'Search gateways…',
+      noSearchResults: 'No gateways match your search.',
       loadFailed: 'Could not load connections',
+      currentPill: 'Current',
       primaryPill: 'Primary',
-      managedPill: 'This device',
+      managedPill: 'App-managed',
       addConnection: 'Add connection',
       editConnection: 'Edit',
       removeConnection: 'Remove',
@@ -1729,8 +1772,10 @@ export const en: Translations = {
     allProfiles: 'All profiles',
     showAllProfiles: 'Show all profiles',
     switchToProfile: name => `Switch to ${name}`,
+    switchToConnection: name => `Switch to ${name}`,
+    switchConnectionFailed: name => `Could not connect to ${name}`,
     manageProfiles: 'Manage profiles…',
-    connectGateway: 'Connect another Hermes gateway…',
+    connectGateway: 'Manage gateways…',
     actions: 'Actions',
     color: 'Color…',
     colorFor: 'Color',
@@ -2391,6 +2436,7 @@ export const en: Translations = {
       openPr: 'Open PR',
       ghMissing: 'Install the GitHub CLI (gh) and sign in to open PRs',
       agentShip: 'Ask Hermes to open PR',
+      agentShipUnavailable: "The chat that owns these changes isn't on screen.",
       agentShipPrompt:
         'Review the current changes, commit them with a clear conventional-commit message, push the branch, and open a pull request.',
       newBranch: 'New branch',
@@ -2925,6 +2971,11 @@ export const en: Translations = {
   zones: {
     showHeader: 'Show header',
     hideHeader: 'Hide header',
+    showStripTab: title => `Show ${title}`,
+    hideStripTab: title => `Hide ${title}`,
+    lastTabKeptTitle: 'Last tab stays',
+    lastTabKeptBody: 'This zone needs at least one visible tab. Show another tab first, or collapse the whole sidebar.',
+    toggleStripTab: title => `Toggle ${title} tab`,
     minimize: 'Minimize',
     restore: 'Restore',
     closeRunningTitle: 'Close running tab?',
@@ -2963,6 +3014,30 @@ export const en: Translations = {
     notExpressible: 'this arrangement interlocks (pinwheel) — not expressible as nested splits yet',
     zoneCount: count => `${count} zones`,
     tabCount: count => `${count} tabs`
+  },
+
+  contextMenu: {
+    link: {
+      openInApp: 'Open in in-app browser',
+      openExternal: 'Open in external browser',
+      copyUrl: 'Copy URL',
+      copyResolvedUrl: 'Copy resolved URL'
+    },
+    image: {
+      copyImage: 'Copy image',
+      copyImageAddress: 'Copy image address',
+      saveImageAs: 'Save image as…'
+    },
+    edit: {
+      cut: 'Cut',
+      paste: 'Paste',
+      selectAll: 'Select all',
+      addToDictionary: 'Add to dictionary'
+    },
+    page: {
+      copyPageUrl: 'Copy page URL',
+      inspectElement: 'Inspect element'
+    }
   },
 
   assistant: {
@@ -3034,6 +3109,9 @@ export const en: Translations = {
       skip: 'Skip',
       skipped: 'Skipped',
       continueLabel: 'Continue',
+      confirmAndContinueLabel: 'Confirm and continue',
+      answeredBadge: 'Answered',
+      questionProgress: (answered, total) => `${answered} of ${total} answered`,
       lateAnswer: (question, choice) => `Re: "${question}" — my answer: ${choice}`,
       lateAnswerTip: 'Draft this answer as a follow-up message',
       lateAnswerHint: 'This prompt is no longer waiting. Pick an option to draft it as a follow-up message.'

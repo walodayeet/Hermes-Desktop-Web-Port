@@ -1,6 +1,8 @@
 import { useStore } from '@nanostores/react'
 import { useMemo } from 'react'
+import { useNavigate } from 'react-router'
 
+import { ConnectionSwitcher } from '@/app/chat/sidebar/connection-switcher'
 import type { CommandCenterSection } from '@/app/command-center'
 import { useApprovalModeStatusbarItem } from '@/app/shell/approval-mode-menu'
 import { ContextUsagePanel } from '@/app/shell/context-usage-panel'
@@ -92,6 +94,8 @@ export function useStatusbarItems({
   // the takeover store alone stays true behind a stacked sibling tab or a
   // minimized zone, which lit the button for a pane the user couldn't see.
   const terminalShowing = useStore($paneVisible('terminal'))
+  const sessionsShowing = useStore($paneVisible('sessions'))
+  const botsShowing = useStore($paneVisible('hermes-bots:pane'))
   const primaryBusy = useStore($busy)
   // Draft / primary composer atom — used only while the focused surface is the
   // primary (or a draft with no runtime slice yet). A focused TILE keeps its
@@ -386,36 +390,46 @@ export function useStatusbarItems({
     copy
   ])
 
-  const connectionItem = useMemo<StatusbarItem | null>(() => {
-    if (connection?.mode !== 'remote' || !connection.remoteHost) {
-      return null
-    }
-
-    const ssh = connection.remoteKind === 'ssh'
-    const cloud = connection.remoteKind === 'cloud'
-
-    return {
-      className: cn(
-        'px-2 -ml-1 font-medium',
-        ssh ? 'bg-primary text-primary-foreground' : 'bg-accent text-accent-foreground'
-      ),
-      icon: <Terminal className="size-3" />,
-      id: 'connection',
-      label: ssh
-        ? copy.connectionSsh(connection.remoteHost)
-        : cloud
-          ? copy.connectionCloud(connection.remoteHost)
-          : copy.connectionRemote(connection.remoteHost),
-      // Label already names the host — no "click to manage" tip lecture.
-      to: `${SETTINGS_ROUTE}?tab=gateway`
-    }
-  }, [connection?.mode, connection?.remoteHost, connection?.remoteKind, copy])
-
-  // Web port (mobile): statusbar trimmed to plugins/context/folder.
-  // Everything except the current-folder chip is hidden (plugins arrive via
-  // extraRightItems and the context meter survives in the right array).
   const coreLeftStatusbarItems = useMemo<readonly StatusbarItem[]>(
     () => [
+      {
+        className: `w-7 justify-center px-0${commandCenterOpen ? ' bg-accent/55 text-foreground' : ''}`,
+        icon: <Command className="size-3.5" />,
+        id: 'command-center',
+        // The system icon: the way into every other surface, including the
+        // settings that would bring a hidden item back. Never hideable.
+        lockedVisible: true,
+        onSelect: toggleCommandCenter,
+        title: commandCenterOpen ? copy.closeCommandCenter : copy.openCommandCenter,
+        toggleLabel: copy.toggleCommandCenter,
+        variant: 'action'
+      },
+      {
+        hidden: !sessionsShowing,
+        id: 'gateway-switcher',
+        lockedVisible: true,
+        render: () => <StatusbarGatewaySwitcher />
+      },
+      {
+        className: gatewayRestarting ? undefined : gatewayClassName,
+        detail: gatewayRestarting ? copy.gatewayRestarting : gatewayDetail,
+        hidden: botsShowing,
+        icon: gatewayRestarting ? (
+          <GlyphSpinner ariaLabel={copy.gatewayRestarting} className="size-3" />
+        ) : inferenceReady ? (
+          <Activity className="size-3" />
+        ) : (
+          <AlertCircle className="size-3" />
+        ),
+        id: 'gateway-health',
+        label: copy.gateway,
+        menuClassName: 'w-72',
+        menuContent: gatewayMenuContent,
+        // Tip only when there's a real status reason — not "gateway status" restating the label.
+        title: inferenceStatus?.reason || undefined,
+        toggleLabel: copy.gateway,
+        variant: 'menu'
+      },
       {
         hidden: !currentCwd,
         icon: <FolderOpen className="size-3" />,
@@ -495,8 +509,8 @@ export function useStatusbarItems({
     ],
     [
       agentsOpen,
+      botsShowing,
       commandCenterOpen,
-      connectionItem,
       copy,
       currentCwd,
       fileMenu.copyPath,
@@ -510,6 +524,7 @@ export function useStatusbarItems({
       inferenceStatus?.reason,
       openAgents,
       projectName,
+      sessionsShowing,
       subagentsFailed,
       subagentsRunning,
       toggleCommandCenter
@@ -590,4 +605,10 @@ export function useStatusbarItems({
   )
 
   return { leftStatusbarItems, statusbarItems }
+}
+
+function StatusbarGatewaySwitcher() {
+  const navigate = useNavigate()
+
+  return <ConnectionSwitcher compact onConnect={() => navigate(`${SETTINGS_ROUTE}?tab=connections`)} />
 }

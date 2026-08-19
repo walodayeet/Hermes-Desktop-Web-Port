@@ -65,6 +65,8 @@ import {
   $gatewayState,
   $messages,
   $selectedStoredSessionId,
+  $sessions,
+  rememberedSessionProfile,
   requestSessionResume,
   setResumeExhaustedSessionId
 } from '@/store/session'
@@ -103,6 +105,22 @@ const $focusedBusy = focusedTurnFlag(state => state.busy, PRIMARY_SESSION_VIEW.$
 const $focusedAwaitingResponse = focusedTurnFlag(
   state => state.awaitingResponse,
   PRIMARY_SESSION_VIEW.$awaitingResponse
+)
+
+/**
+ * Owner profile of the FOCUSED chat. The gateway-routing atom
+ * (`$activeGatewayProfile`) answers "which backend is the live socket homed
+ * on" — but tab/tile focus moves without swapping the socket, and a cold
+ * start can restore a route into a session the booting gateway doesn't own.
+ * Any per-bot readout (roster highlight, a bot-scoped panel) must follow the
+ * chat the user is LOOKING AT, so this resolves the focused stored session to
+ * the owner stamped on its session row (the cross-profile aggregator tags
+ * every row) and only falls back to the gateway profile for a draft or an
+ * uncached id — the same ladder the remembered-navigation key and the HUD use.
+ */
+const $focusedSessionProfile = computed(
+  [$focusedStoredSessionId, $sessions, $activeGatewayProfile],
+  (focused, sessions, activeProfile) => normalizeProfileKey(rememberedSessionProfile(sessions, focused, activeProfile))
 )
 
 export interface PluginProfileRoute {
@@ -260,9 +278,23 @@ function waitForFocusedSessionHydration({
       const profileMatches = normalizeProfileKey($activeGatewayProfile.get()) === profile
       const sessionMatches = $selectedStoredSessionId.get() === storedSessionId
       const runtimeReady = Boolean($activeSessionId.get())
-      const historyReady = !expectHistory || Boolean($messages.get().length)
+      const historyPainted = Boolean($messages.get().length)
 
-      if (profileMatches && sessionMatches && runtimeReady && historyReady) {
+      // Paint-first hydration: for a history-bearing chat, the wake is DONE
+      // the moment the persisted transcript is painted on the right session —
+      // the REST prefetch delivers it seconds after the profile backend's
+      // HTTP comes up, while the full runtime resume (agent build, MCP
+      // discovery, skill load) keeps warming in the background and binds the
+      // composer when it lands. Gating on runtimeReady serialized the wake
+      // behind that whole boot: on a cold multi-profile start the 20s budget
+      // regularly lost the race on slower machines and surfaced as "errors
+      // waking up bots" even though the transcript had been available almost
+      // immediately. Only an expected-EMPTY chat still waits for the runtime
+      // — with no transcript to paint, a bound runtime is the only proof the
+      // surface is real rather than a stuck loader.
+      const hydrated = expectHistory ? historyPainted : runtimeReady
+
+      if (profileMatches && sessionMatches && hydrated) {
         finish()
       }
     }
@@ -303,6 +335,11 @@ export const host = {
      *  primary. Prefer this over `activeSessionId` for any readout that
      *  should follow the user between tiles (context, tokens, cost). */
     focusedSessionId: readonlyAtom<null | string>($focusedRuntimeId),
+    /** Owner profile of the focused chat (session-row stamp, falling back to
+     *  the gateway profile for drafts/uncached ids). Prefer this over
+     *  `profile` for any readout keyed to the bot/profile the user is looking
+     *  at — tab focus moves without swapping the gateway socket. */
+    focusedSessionProfile: readonlyAtom<string>($focusedSessionProfile),
     /** Stored (durable) id of the focused session — for navigation and
      *  session-list matching, where runtime ids don't survive reloads. */
     focusedStoredSessionId: readonlyAtom<null | string>($focusedStoredSessionId),
@@ -464,9 +501,16 @@ export const host = {
     const profile = (options.profile ?? '').trim()
     const targetProfile = normalizeProfileKey(profile || $activeGatewayProfile.get())
     const expectHistory = options.expectHistory ?? false
+    // Wake-path phase timings. Logged ONLY on a hydration timeout (bridged
+    // into desktop.log via the renderer-console tap), so a support bundle
+    // pinpoints WHERE the budget went — profile activation vs hydration —
+    // instead of leaving us to infer it from process spawn timestamps.
+    const wakeStartedAt = Date.now()
+    let profileActiveAt = wakeStartedAt
 
     if (profile && profile !== $activeGatewayProfile.get()) {
       await ensureGatewayProfile(profile)
+      profileActiveAt = Date.now()
 
       if (options.keepAllProfilesScope !== false) {
         setShowAllProfiles(true)
@@ -533,6 +577,15 @@ export const host = {
         error instanceof Error &&
         error.message.startsWith('Timed out loading ')
       ) {
+        console.warn('[bot-wake] hydration timed out', {
+          hydrationWaitMs: Date.now() - profileActiveAt,
+          profile: targetProfile,
+          profileActivationMs: profileActiveAt - wakeStartedAt,
+          runtimeBound: Boolean($activeSessionId.get()),
+          selectionSettled: $selectedStoredSessionId.get() === storedSessionId,
+          storedSessionId,
+          transcriptPainted: $messages.get().length > 0
+        })
         // Reuse the core stranded-session surface: it renders the explicit
         // error and Retry button, and the normal resume path clears the latch.
         setResumeExhaustedSessionId(storedSessionId)
@@ -794,6 +847,7 @@ export type {
   PluginContext,
   PluginContribution,
   PluginNativeNotificationInput,
+  PluginNotificationAction,
   PluginOs,
   PluginRestOptions,
   PluginStorage
@@ -836,6 +890,7 @@ export { type BudgetedLoop, type BudgetedLoopOptions, createBudgetedLoop } from 
  *  through here (1230 → "1.2k", 1_500_000 → "1.5M"). Don't hand-roll `/1000`. */
 export { compactNumber } from '@/lib/format'
 export { triggerHaptic as haptic } from '@/lib/haptics'
+export type { HermesOpenTarget } from '@/lib/hermes-open-target'
 /** The app's lucide icon set (RefreshCw, LayoutDashboard, Activity, …). */
 export * as icons from '@/lib/icons'
 export { type KeybindContribution, KEYBINDS_AREA } from '@/lib/keybinds/actions'
@@ -883,6 +938,10 @@ export { useStore as useValue } from '@nanostores/react'
  *  the app root, so their queries cache, dedupe, poll (`refetchInterval`), and
  *  invalidate exactly like core screens — no hand-rolled atoms or polls. */
 export { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+/** Deterministic soft-body avatars from any string (name → face). String
+ *  renderer for rasterization; React component for live rendering. */
+export { blobatar as blobatarSvg } from 'blobatar/blob'
+export { Blobatar } from 'blobatar/react'
 /** Plugin-local reactive state (share between a trigger and its panel, poll
  *  loops, cross-component signals) — the same primitive `host.state` uses. */
 export { atom, computed } from 'nanostores'

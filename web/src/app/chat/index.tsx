@@ -3,7 +3,7 @@ import { useStore } from '@nanostores/react'
 import { useQuery } from '@tanstack/react-query'
 import type { ReadableAtom } from 'nanostores'
 import type * as React from 'react'
-import { memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router'
 
 import type { SubmitTextOptions } from '@/app/session/hooks/use-prompt-actions/utils'
@@ -26,6 +26,7 @@ import { modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
 import { cn } from '@/lib/utils'
 import { migrateSessionDraft } from '@/store/composer'
 import { migrateQueuedPrompts, parkQueuedPrompts } from '@/store/composer-queue'
+import { $introSplash } from '@/store/intro-splash'
 import { $pinnedSessionIds } from '@/store/layout'
 import { $petActive } from '@/store/pet'
 import { $petOverlayActive } from '@/store/pet-overlay'
@@ -56,10 +57,11 @@ import { ChatSwapOverlay } from './chat-swap-overlay'
 import { ChatBar, ChatBarFallback } from './composer'
 import { requestComposerInsert } from './composer/focus'
 import { droppedFileInlineRefs } from './composer/inline-refs'
-import { useComposerScope } from './composer/scope'
+import { ComposerSurfaceProvider, useComposerScope, useComposerSurfaceId } from './composer/scope'
 import type { ChatBarState } from './composer/types'
 import { type DroppedFile, partitionDroppedFiles } from './hooks/use-composer-actions'
 import { type DragKind, useFileDropZone } from './hooks/use-file-drop-zone'
+import { shouldShowIntro } from './intro-visibility'
 import { ProfileTag } from './profile-tag'
 import { isRouteSessionMismatch } from './route-session-state'
 import { useRuntimeMessageRepository } from './runtime-repository'
@@ -320,7 +322,17 @@ function ChatRuntimeBoundary({
 // Memoized: the tile caller (session-tile.tsx) and the contrib surface re-render
 // on idle ticks unrelated to the chat; with stable callback props (hoisted to
 // useCallback at the call sites) memo() lets the whole chat shell skip those.
-export const ChatView = memo(function ChatView({
+export const ChatView = memo(function ChatView(props: ChatViewProps) {
+  const composerSurfaceId = useId()
+
+  return (
+    <ComposerSurfaceProvider value={composerSurfaceId}>
+      <ChatViewContent {...props} />
+    </ComposerSurfaceProvider>
+  )
+})
+
+const ChatViewContent = memo(function ChatViewContent({
   className,
   gateway,
   modelMenuContent,
@@ -355,6 +367,7 @@ export const ChatView = memo(function ChatView({
   // atoms) or a tile's session slice — same component either way.
   const view = useSessionView()
   const composerScope = useComposerScope()
+  const composerSurfaceId = useComposerSurfaceId()
   const isPrimary = view.kind === 'primary'
   const activeSessionId = useStore(view.$runtimeId)
   const storedId = useStore(view.$storedId)
@@ -380,6 +393,7 @@ export const ChatView = memo(function ChatView({
   const gatewayOpen = gatewayState === 'open'
   const introPersonality = useStore($introPersonality)
   const introSeed = useStore($introSeed)
+  const introSplash = useStore($introSplash)
   // PERF: ChatView must not subscribe to the view's $messages — the atom is
   // replaced on every streaming delta flush (~30×/s) and a subscription here
   // re-renders the entire chat shell (header, chat bar, thread wrapper) per
@@ -444,15 +458,18 @@ export const ChatView = memo(function ChatView({
   const routeSessionMismatch = isPrimary ? isRouteSessionMismatch(routedSessionId, selectedSessionId, sessions) : false
 
   // The compact new-session pop-out skips the wordmark/tagline intro — it's a
-  // scratch window, not the full-height empty state.
-  const showIntro =
-    isPrimary &&
-    !isAuxiliaryWindow() &&
-    freshDraftReady &&
-    !isRoutedSessionView &&
-    !selectedSessionId &&
-    !activeSessionId &&
-    messagesEmpty
+  // scratch window, not the full-height empty state. The Appearance toggle
+  // turns it off everywhere else.
+  const showIntro = shouldShowIntro({
+    activeSessionId,
+    auxiliaryWindow: isAuxiliaryWindow(),
+    enabled: introSplash,
+    freshDraftReady,
+    messagesEmpty,
+    primary: isPrimary,
+    routedSessionView: isRoutedSessionView,
+    selectedSessionId
+  })
 
   // Session is still loading if the route references a session we haven't
   // resumed yet. Once `activeSessionId` is set (runtime has resumed), the
@@ -558,6 +575,7 @@ export const ChatView = memo(function ChatView({
         className
       )}
       data-chat-surface=""
+      data-composer-surface-id={composerSurfaceId}
       data-composer-target={composerScope.target}
       data-session-anchor={sessionAnchor}
     >

@@ -104,7 +104,9 @@ export default defineConfig(({ command }) => ({
     // imports stay lazy, and the file count stays in the tens.
     chunkSizeWarningLimit: 25000,
     rolldownOptions: {
+      external: (id: string) => id.startsWith('driver.js/'),
       output: {
+        inlineDynamicImports: true,
         advancedChunks: {
           groups: [
             // Shared foundations FIRST (first match wins): an unmatched

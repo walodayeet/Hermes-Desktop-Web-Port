@@ -518,7 +518,7 @@ select,
        This is the default; each chat surface re-declares the calc against its own measurement (see below). */
     --thread-last-message-clearance: calc(var(--composer-measured-height) + 2rem);
 
-    --composer-shell-pad-block-end: 0.625rem; /* Web port (mobile): composer pad — statusbar owns the safe-area inset */
+    --composer-shell-pad-block-end: 0.625rem;
     --message-text-indent: 0.75rem;
     --conversation-text-font-size: 0.8125rem;
     --conversation-tool-font-size: 0.6875rem;
@@ -633,23 +633,25 @@ select,
   }
 
   /* ── Window glass (Settings → Appearance → Window Translucency: Glass) ──
-     Set on <html> by store/translucency.ts; macOS chat windows only. Every
-     chat window already carries an NSVisualEffectView (`vibrancy: 'sidebar'`
-     in electron/main.ts) that WindowServer composites BELOW the web contents;
-     the page normally buries it under fully opaque surfaces.
+     Set on <html> by store/translucency.ts; chat windows on a glass-capable
+     OS (macOS vibrancy, Windows 11 DWM acrylic/mica). The native material
+     composites BELOW the web contents; the page normally buries it under
+     fully opaque surfaces.
 
      ONE PAINTER: <body> paints the glass tint exactly once, at
-     `--translucency-glass-keep` (set inline from the intensity slider, floor
-     30%), and the field tokens (chat / sidebar / editor surface) go fully
-     transparent. The field surfaces NEST — body > pane container > chat
-     section > transcript wrapper all wear these tokens — so thinning the
-     tokens themselves stacks the tint once per layer and a session pane ends
-     up near-opaque (~0.93 at 60%) while the landing page, with fewer layers,
-     reads far clearer. With a single painter the field alpha is the same
-     number on every route. Raised content (cards, popovers, bubbles, the
-     composer) keeps its own opaque fills over full-contrast text; regions
-     still read distinct through their borders and the material itself.
-     Unlike Clear, nothing on the page fades.
+     `--translucency-glass-keep` (set inline from the Tint slider, linear to
+     zero — the top of the lever is bare material), and the field tokens
+     (chat / sidebar / editor surface) go fully transparent. The field
+     surfaces NEST — body > pane container > chat section > transcript
+     wrapper all wear these tokens — so thinning the tokens themselves stacks
+     the tint once per layer and a session pane ends up near-opaque (~0.93 at
+     60%) while the landing page, with fewer layers, reads far clearer. With a
+     single painter the field alpha is the same number on every route. Raised
+     content (cards, popovers, bubbles, the composer) keeps its own opaque
+     fills over full-contrast text; regions still read distinct through their
+     borders and the material itself. Unlike Clear, nothing on the page fades
+     — the separate Fade lever does that natively, at the window level, and
+     defaults to off.
 
      The boot script in index.html pins an opaque inline background on <html>
      before first paint; it has to go transparent here or it sits behind the
@@ -2025,8 +2027,8 @@ body.guest-pointer-lock :is(webview, iframe) {
    *pairs* qualified meant the live status line (not tool, thinking or prose)
    fell through every branch and carried its own half-size margin instead. */
 [data-slot='aui_assistant-message-content']
-  > :is([data-slot='tool-block'], [data-slot='aui_thinking-disclosure'], [data-slot='aui_stream-stall'], .aui-md)
-  + :is([data-slot='tool-block'], [data-slot='aui_thinking-disclosure'], [data-slot='aui_stream-stall'], .aui-md) {
+  > :is([data-slot='tool-block'], [data-slot='aui_thinking-disclosure'], [data-slot='aui_turn-activity'], .aui-md)
+  + :is([data-slot='tool-block'], [data-slot='aui_thinking-disclosure'], [data-slot='aui_turn-activity'], .aui-md) {
   margin-top: var(--turn-block-gap);
 }
 
@@ -2044,8 +2046,8 @@ body.guest-pointer-lock :is(webview, iframe) {
    is the wrong hook here: it's absent on a multi-call tool GROUP, which is most
    of a real run, and present on rows nested inside one. */
 [data-slot='aui_assistant-message-content']
-  > :is([data-slot='tool-block'], [data-slot='aui_thinking-disclosure'], [data-slot='aui_stream-stall'])
-  + :is([data-slot='tool-block'], [data-slot='aui_thinking-disclosure'], [data-slot='aui_stream-stall']) {
+  > :is([data-slot='tool-block'], [data-slot='aui_thinking-disclosure'], [data-slot='aui_turn-activity'])
+  + :is([data-slot='tool-block'], [data-slot='aui_thinking-disclosure'], [data-slot='aui_turn-activity']) {
   margin-top: var(--scaffold-block-gap);
 }
 
@@ -2085,11 +2087,15 @@ body.guest-pointer-lock :is(webview, iframe) {
 [data-slot='aui_turn-pair']
   > [data-slot='aui_assistant-message-root']:has(
     > [data-slot='aui_assistant-message-content']
-      > :is([data-slot='tool-block'], [data-slot='aui_thinking-disclosure'], [data-slot='aui_stream-stall']):last-child
+      > :is([data-slot='tool-block'], [data-slot='aui_thinking-disclosure'], [data-slot='aui_turn-activity']):last-child
   ):not(:has([data-file-edit]))
   + [data-slot='aui_assistant-message-root']:has(
     > [data-slot='aui_assistant-message-content']
-      > :is([data-slot='tool-block'], [data-slot='aui_thinking-disclosure'], [data-slot='aui_stream-stall']):first-child
+      > :is(
+        [data-slot='tool-block'],
+        [data-slot='aui_thinking-disclosure'],
+        [data-slot='aui_turn-activity']
+      ):first-child
   ):not(:has([data-file-edit])) {
   margin-top: calc(var(--scaffold-block-gap) - var(--conversation-turn-gap));
 }
