@@ -28,6 +28,32 @@ import { $sessions, sessionMatchesStoredId, sessionPinId } from '@/store/session
 
 // pin ids we've successfully PATCHed pinned=true this session.
 const mirrored = new Set<string>()
+// Web port (mobile): unpin survives slow/failed PATCH — ids the user has
+// UNPINNED whose server PATCH has not yet been confirmed by a page carrying
+// pinned=false. pullRemotePins must not re-adopt them (the old WRITE_GUARD
+// expired after 10s and re-pinned on slow/failed PATCHes). Removed only on
+// server confirmation. Persisted in sessionStorage so a reload mid-write
+// doesn't lose the fence (the boot pull would re-adopt before the slow PATCH
+// lands).
+const DESELECTED_STORAGE_KEY = 'hermes-web.deselectedPins'
+let deselected = new Set<string>(loadDeselected())
+
+function loadDeselected(): string[] {
+  try {
+    const raw = window.sessionStorage.getItem(DESELECTED_STORAGE_KEY)
+    return raw ? (JSON.parse(raw) as string[]) : []
+  } catch {
+    return []
+  }
+}
+
+function saveDeselected(): void {
+  try {
+    window.sessionStorage.setItem(DESELECTED_STORAGE_KEY, JSON.stringify([...deselected]))
+  } catch {
+    // Best-effort — the in-memory fence still works for this session.
+  }
+}
 // pin ids awaiting their row so we can resolve the owning profile before PATCH.
 const pending = new Set<string>()
 // Writes we've issued, id -> the value we wrote and when. A list page already
@@ -113,6 +139,18 @@ function pullRemotePins(): void {
       continue
     }
 
+    // Web port (mobile): a user-initiated unpin whose PATCH hasn't been
+    // confirmed yet must not be re-adopted from a stale page. Skip until the
+    // server row actually reports pinned=false.
+    if (deselected.has(pinId) || deselected.has(row.id)) {
+      if (!row.pinned) {
+        deselected.delete(pinId)
+        deselected.delete(row.id)
+        saveDeselected()
+      }
+      continue
+    }
+
     if (row.pinned && !heldLocally) {
       // Mark mirrored first: pinSession fires the pin listener synchronously,
       // and the nested reconcile must not see this as a new pin to PATCH.
@@ -142,11 +180,26 @@ function reconcile(): void {
   const current = new Set($pinnedSessionIds.get())
 
   // Unpinned: anything we were tracking that's no longer in the set.
-  for (const id of [...mirrored, ...pending]) {
+  for (const id of [...new Set([...mirrored, ...pending, ...deselected])]) {
     if (!current.has(id)) {
       mirrored.delete(id)
       pending.delete(id)
-      void writePin(id, false, profileFor(id)).catch(() => {})
+      deselected.add(id)
+      saveDeselected()
+      void writePin(id, false, profileFor(id)).catch(() => {
+        // Web port (mobile): a failed unpin PATCH must not be swallowed — the
+        // server would keep pinned=true and re-adopt on the next page. Retry
+        // with backoff instead (the deselected fence holds meanwhile).
+        const retry = (attempt: number) => {
+          // Stop if the user re-pinned (id is back in the local set) or the
+          // server already confirmed the unpin (deselected fence cleared).
+          if ($pinnedSessionIds.get().includes(id) || !deselected.has(id)) return
+          void writePin(id, false, profileFor(id)).catch(() => {
+            window.setTimeout(() => retry(attempt + 1), Math.min(1000 * 2 ** attempt, 15000))
+          })
+        }
+        window.setTimeout(() => retry(1), 2000)
+      })
     }
   }
 
@@ -204,4 +257,6 @@ export function resetSessionPinMirror(): void {
   mirrored.clear()
   pending.clear()
   unconfirmed.clear()
+  deselected.clear()
+  saveDeselected()
 }
