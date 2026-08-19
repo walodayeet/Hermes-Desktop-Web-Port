@@ -113,8 +113,17 @@ export function NarrowOverlays() {
       {/* Hover-intent strips on each edge that has a collapsed pane. */}
       {sides.map(side => (
         <div
-          className={cn('absolute inset-y-0 z-30 w-1.5', side === 'left' ? 'left-0' : 'right-0')}
+          className={cn(
+            'absolute inset-y-0 z-30 flex w-6 items-center',
+            side === 'left' ? 'left-0 justify-start' : 'right-0 justify-end'
+          )}
           key={side}
+          onClick={() => {
+            const first = collapsibles.find(p => sideOf(p) === side)
+            if (first) {
+              setReveal(current => (current?.id === first.id && current.pinned ? null : { id: first.id, pinned: true }))
+            }
+          }}
           onMouseEnter={() => {
             const first = collapsibles.find(p => sideOf(p) === side)
 
@@ -122,7 +131,20 @@ export function NarrowOverlays() {
               setReveal(current => (current?.pinned ? current : { id: first.id, pinned: false }))
             }
           }}
-        />
+        >
+          {/* Web port (mobile): visible grip so a collapsed pane has a touch
+              affordance — a chevron pointing toward the overlay edge. */}
+          <div
+            className="pointer-events-none flex h-16 w-5 items-center justify-center rounded-sm bg-(--ui-sidebar-surface-background) text-(--ui-text-tertiary) shadow-sm ring-1 ring-(--ui-stroke-secondary)"
+            style={{ writingMode: 'vertical-rl' }}
+          >
+            {side === 'left' ? (
+              <span className="text-[0.6rem]">‹</span>
+            ) : (
+              <span className="text-[0.6rem]">›</span>
+            )}
+          </div>
+        </div>
       ))}
 
       {revealed && (

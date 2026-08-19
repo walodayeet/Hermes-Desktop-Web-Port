@@ -772,6 +772,68 @@ patchFile(
 'flex h-[calc(1.25rem+var(--safe-area-bottom,0px))] shrink-0 items-stretch justify-between gap-2 bg-(--ui-sidebar-surface-background) px-1 pb-[var(--safe-area-bottom,0px)] text-(--ui-text-tertiary) [-webkit-app-region:no-drag]'`,
 )
 
+// --- renderer/narrow-overlays.tsx: tappable edge strips for collapsed panes --
+// Root cause: NarrowOverlays reveals collapsed panes via MOUSE-hover edge
+// strips + PANE_TOGGLE_REVEAL_EVENT (⌘B/⌘G/titlebar toggles). On a touch
+// screen there's no mouse, so a collapsible pane with NO titlebar toggle
+// (hermes-bots' Bots/Cronjobs, which the Bots-autopen fix made collapsible)
+// slides into an edge overlay that can't be reopened — unreachable. Sessions
+// and files are saved by their titlebar toggles; Bots/Cronjobs have none.
+// Fix: make each edge strip a wider, tappable affordance with a visible grip
+// chip, so a tap opens (and a pinned re-tap closes) the collapsed pane.
+patchFile(
+  'components/pane-shell/tree/renderer/narrow-overlays.tsx',
+  'Web port (mobile): tappable narrow-overlay edge strips',
+  `      {sides.map(side => (
+        <div
+          className={cn('absolute inset-y-0 z-30 w-1.5', side === 'left' ? 'left-0' : 'right-0')}
+          key={side}
+          onMouseEnter={() => {
+            const first = collapsibles.find(p => sideOf(p) === side)
+
+            if (first) {
+              setReveal(current => (current?.pinned ? current : { id: first.id, pinned: false }))
+            }
+          }}
+        />
+      ))}`,
+  `      {sides.map(side => (
+        <div
+          className={cn(
+            'absolute inset-y-0 z-30 flex w-6 items-center',
+            side === 'left' ? 'left-0 justify-start' : 'right-0 justify-end'
+          )}
+          key={side}
+          onClick={() => {
+            const first = collapsibles.find(p => sideOf(p) === side)
+            if (first) {
+              setReveal(current => (current?.id === first.id && current.pinned ? null : { id: first.id, pinned: true }))
+            }
+          }}
+          onMouseEnter={() => {
+            const first = collapsibles.find(p => sideOf(p) === side)
+
+            if (first) {
+              setReveal(current => (current?.pinned ? current : { id: first.id, pinned: false }))
+            }
+          }}
+        >
+          {/* Web port (mobile): visible grip so a collapsed pane has a touch
+              affordance — a chevron pointing toward the overlay edge. */}
+          <div
+            className="pointer-events-none flex h-16 w-5 items-center justify-center rounded-sm bg-(--ui-sidebar-surface-background) text-(--ui-text-tertiary) shadow-sm ring-1 ring-(--ui-stroke-secondary)"
+            style={{ writingMode: 'vertical-rl' }}
+          >
+            {side === 'left' ? (
+              <span className="text-[0.6rem]">‹</span>
+            ) : (
+              <span className="text-[0.6rem]">›</span>
+            )}
+          </div>
+        </div>
+      ))}`,
+)
+
 if (touched === 0) {
   console.log('no patches applied (all present)')
 } else {
