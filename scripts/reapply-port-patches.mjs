@@ -264,7 +264,7 @@ patchFile(
 // patch's `already patched` guard.
 patchFile(
   'styles.css',
-  'Web port (mobile): touch targets 44px floor',
+  'Web port (mobile): touch targets — MODEST bump',
   `  [data-zone-tabstrip] [role='tab'],
   [data-tree-tab] {
     -webkit-touch-callout: none;
@@ -539,35 +539,36 @@ patchFile(
 // the routine list is an explicit tap, not an autopen.
 patchFile(
   'plugins/hermes-bots/plugin.js',
-  '// Web port (mobile): Bots pane collapsible → drawer overlay, not a column',
-  "      data: { placement: 'left', width: '260px', dock: { pane: 'sessions', pos: 'bottom' } },",
+  'collapsible so a phone boots to the chat',
+  "      data: { placement: 'left', width: '260px', dock: { pane: 'sessions', pos: 'center', enforce: true } },",
   `      data: {
         placement: 'left',
         width: '260px',
-        dock: { pane: 'sessions', pos: 'bottom' },
+        dock: { pane: 'sessions', pos: 'center', enforce: true },
         // Web port (mobile): collapsible so a phone boots to the chat — Bots
         // leaves the grid under 768px and becomes an edge-overlay drawer an
-        // explicit tap opens, instead of a 155px column that auto-fronts and
-        // blocks the chat on every reload.
+        // explicit tap opens, instead of a column that auto-fronts and blocks
+        // the chat on every reload. (enforce only re-homes the dock position;
+        // it does not defeat the narrow-viewport collapse.)
         collapsible: true
       },`,
 )
 patchFile(
   'plugins/hermes-bots/plugin.js',
-  '// Web port (mobile): Cronjobs pane collapsible → drawer overlay, not a column',
-  `      data: {
-        placement: 'main',
-        dock: { pane: 'workspace', pos: 'right' },
-        width: '250px'
-      },`,
-  `      data: {
-        placement: 'main',
-        dock: { pane: 'workspace', pos: 'right' },
-        width: '250px',
-        // Web port (mobile): collapsible so the Cronjobs list doesn't hold a
-        // 149px column on a phone; it becomes a right-edge drawer.
-        collapsible: true
-      },`,
+  'collapsible so the Cronjobs list',
+  `        data: {
+          placement: 'main',
+          dock: { pane: 'workspace', pos: 'right' },
+          width: '250px'
+        },`,
+  `        data: {
+          placement: 'main',
+          dock: { pane: 'workspace', pos: 'right' },
+          width: '250px',
+          // Web port (mobile): collapsible so the Cronjobs list doesn't hold a
+          // 149px column on a phone; it becomes a right-edge drawer.
+          collapsible: true
+        },`,
 )
 
 // --- components/ui/pane-tab.tsx: touch long-press opens the close menu --------

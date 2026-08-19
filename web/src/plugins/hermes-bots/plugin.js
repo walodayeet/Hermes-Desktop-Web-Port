@@ -9366,7 +9366,17 @@ export default {
       // An intra-session drag still sticks until the next launch (the
       // invariant runs at adoption time only — see enforceDockedPanes in the
       // tree store).
-      data: { placement: 'left', width: '260px', dock: { pane: 'sessions', pos: 'center', enforce: true } },
+      data: {
+        placement: 'left',
+        width: '260px',
+        dock: { pane: 'sessions', pos: 'center', enforce: true },
+        // Web port (mobile): collapsible so a phone boots to the chat — Bots
+        // leaves the grid under 768px and becomes an edge-overlay drawer an
+        // explicit tap opens, instead of a column that auto-fronts and blocks
+        // the chat on every reload. (enforce only re-homes the dock position;
+        // it does not defeat the narrow-viewport collapse.)
+        collapsible: true
+      },
       render: () => jsx(BotsPane, {})
     })
 
@@ -9390,7 +9400,10 @@ export default {
         data: {
           placement: 'main',
           dock: { pane: 'workspace', pos: 'right' },
-          width: '250px'
+          width: '250px',
+          // Web port (mobile): collapsible so the Cronjobs list doesn't hold a
+          // 149px column on a phone; it becomes a right-edge drawer.
+          collapsible: true
         },
         render: () => jsx(RoutinesPane, {})
       })
