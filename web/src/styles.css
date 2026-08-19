@@ -42,21 +42,20 @@
   [data-tree-tab] {
     -webkit-touch-callout: none;
   }
-  /* Web port (mobile): touch targets — Apple HIG floor is 44px; the desktop
-     chrome (composer controls 1.5rem, statusbar actions ~11px text + 6px
-     padding) is 24–28px even after the 18px root bump. Enlarge the
-     interactive controls only; labels/passive text keep design sizes. */
+  /* Web port (mobile): touch targets — MODEST bump only. The earlier 44px
+     floor (min-height/min-width 2.75rem) broke the layout: the statusbar is a
+     fixed 20px footer, so 44px items clipped their text and left dead space;
+     and 36–44px composer controls + 44px min-width squeezed the input and the
+     model pill off a 390px phone. Bump sizes mildly and leave min-width alone
+     (labels/model name need the room). */
   :root {
-    --composer-control-size: 2.25rem;
-    --composer-control-primary-size: 2.5rem;
-    --composer-surface-pad-y: 0.5rem;
+    --composer-control-size: 1.75rem;
+    --composer-control-primary-size: 1.875rem;
+    --composer-surface-pad-y: 0.375rem;
   }
   [data-slot='composer-root'] button,
-  [data-slot='composer-dock'] button,
-  [data-slot='statusbar'] button,
-  [data-slot='statusbar'] a {
-    min-height: 2.75rem;
-    min-width: 2.75rem;
+  [data-slot='composer-dock'] button {
+    min-height: 2rem;
   }
 }
 
