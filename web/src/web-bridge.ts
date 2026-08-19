@@ -14,7 +14,16 @@
  */
 
 import { buildHermesWebSocketUrl } from '@hermes/shared'
-import type { DesktopMarketplaceSearchItem, DesktopMarketplaceThemeResult } from '@/global'
+import type {
+  DesktopAgentRoster,
+  DesktopConnectionsRegistry,
+  DesktopMarketplaceSearchItem,
+  DesktopMarketplaceThemeResult,
+  DesktopPluginProfileRoute,
+  DesktopRegistryConnection,
+  DesktopRegistryConnectionInput,
+  HermesConnection,
+} from '@/global'
 
 // ── config ──────────────────────────────────────────────────────────────────
 // Same-origin by default (served through the proxy). Override with
@@ -262,6 +271,255 @@ async function mintWsUrl(profile?: null | string): Promise<string> {
   })
 }
 
+// ── v2 multi-connection registry (remote gateways) ──────────────────────────
+// The renderer's registry UI + routing call the proxy's /web-connections door;
+// token bytes never reach the browser (the door redacts to tokenSet/
+// tokenPreview, and the proxy injects auth on forwarded requests).
+
+const LOCAL_CONNECTION_ID = 'local'
+const CONNECTIONS_DOOR = `${API_BASE}/web-connections`
+
+function isNonLocalConnection(connectionId: null | undefined | string): boolean {
+  const id = String(connectionId ?? '').trim()
+  return Boolean(id) && id !== LOCAL_CONNECTION_ID
+}
+
+/** Same-origin base the renderer can address for a remote connection. The
+ *  browser NEVER talks to the remote origin directly (CORS + secret safety):
+ *  the proxy routes by X-Hermes-Connection-Id / ?connection=<id>. */
+function connectionBaseUrl(): string {
+  return API_BASE || window.location.origin
+}
+
+async function listConnections(): Promise<DesktopConnectionsRegistry> {
+  return fetchJson<DesktopConnectionsRegistry>(`${CONNECTIONS_DOOR}`)
+}
+
+/** Resolve a registry connection's renderer-facing descriptor (redacted —
+ *  token is always ''; the proxy holds the secret). */
+async function getConnectionFor(payload?: { connectionId?: null | string; profile?: null | string }): Promise<HermesConnection> {
+  const connectionId = String(payload?.connectionId ?? '').trim()
+  const profile = payload?.profile ?? null
+
+  if (!isNonLocalConnection(connectionId)) {
+    // Local / empty → the legacy same-origin connection.
+    return window.hermesDesktop.getConnection(profile)
+  }
+
+  const registry = await listConnections()
+  const conn = registry.connections.find(c => c.id === connectionId)
+  if (!conn) {
+    throw new Error(`No connection with id "${connectionId}"`)
+  }
+
+  return {
+    baseUrl: connectionBaseUrl(),
+    isFullscreen: false,
+    mode: 'remote',
+    authMode: conn.authMode === 'oauth' ? 'oauth' : 'token',
+    remoteKind: conn.kind === 'cloud' ? 'cloud' : 'url',
+    remoteHermesVersion: undefined,
+    nativeOverlayWidth: 0,
+    source: 'settings',
+    token: '',
+    wsUrl: '', // never used for remotes: getGatewayWsUrlFor is always present
+    logs: [],
+    profile: profile ?? undefined,
+    connectionId,
+    windowButtonPosition: null,
+  }
+}
+
+/** Same-origin WS URL for a connection: ?connection=<id> for remotes (the
+ *  proxy injects ?token= server-side), local keeps the ?ticket= path. */
+async function getGatewayWsUrlFor(payload?: { connectionId?: null | string; profile?: null | string }): Promise<{ ok: true; wsUrl: string } | { ok: false; error: string }> {
+  const connectionId = String(payload?.connectionId ?? '').trim()
+
+  if (!isNonLocalConnection(connectionId)) {
+    try {
+      const wsUrl = await mintWsUrl(payload?.profile ?? null)
+      return { ok: true, wsUrl }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  // Ensure the connection still exists (the renderer dials a stale id after a
+  // removal → permanent missing-connection error, same as Electron).
+  try {
+    const registry = await listConnections()
+    if (!registry.connections.some(c => c.id === connectionId)) {
+      return { ok: false, error: `No connection with id "${connectionId}"` }
+    }
+  } catch {
+    // Registry door unreachable → still return a URL; the socket error will
+    // surface and the renderer's reconnect loop retries.
+  }
+
+  return {
+    ok: true,
+    wsUrl: buildHermesWebSocketUrl({
+      path: '/api/ws',
+      params: { connection: connectionId },
+    }),
+  }
+}
+
+async function testConnection(id: string): Promise<{ ok?: boolean; reachable?: boolean; error?: string | null; version?: string | null; installId?: string }> {
+  return fetchJson<{ ok?: boolean; reachable?: boolean; error?: string | null; version?: string | null; installId?: string }>(
+    `${CONNECTIONS_DOOR}/${encodeURIComponent(id)}/test`,
+    { method: 'POST' },
+  )
+}
+
+/** Kebab-slug of a label for @handles — mirrors electron/connection-registry.ts
+ *  `labelSlug` exactly so the web port produces identical duplicate-agent names. */
+function labelSlug(label: string): string {
+  const slug = String(label || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48)
+
+  return slug || 'connection'
+}
+
+/** Fetch a connection's profile names via `/api/profiles` (local = same-origin
+ *  cookie auth; remote = routed through the proxy with the connection header). */
+async function fetchConnectionProfiles(connectionId: null | string): Promise<string[]> {
+  try {
+    const body = await window.hermesDesktop.api<{ profiles?: { name?: string }[] }>({
+      path: '/api/profiles',
+      method: 'GET',
+      connectionId,
+    })
+    const names = Array.isArray(body?.profiles)
+      ? body.profiles.map(p => String(p?.name || '').trim()).filter(Boolean)
+      : []
+    if (!names.includes('default')) names.unshift('default')
+    return names
+  } catch {
+    return ['default']
+  }
+}
+
+/** Enumerate each connection's profiles + reachability, then build the union
+ *  agent roster with the desktop's @name-device disambiguation. Unreachable
+ *  remotes land in `sources` with an error; duplicate install_ids collapse
+ *  into one source (same physical backend under two addresses). */
+async function getAgentRoster(): Promise<DesktopAgentRoster> {
+  const registry = await listConnections()
+  const local = registry.connections.find(c => c.id === LOCAL_CONNECTION_ID)
+
+  const sources: DesktopAgentRoster['sources'] = []
+
+  // (connectionId, profile) → { label, kind } — one row per routable identity.
+  const identities: { connectionId: string; kind: DesktopRegistryConnection['kind']; label: string; profile: string }[] = []
+
+  if (local) {
+    sources.push({ connectionId: local.id, label: local.label, kind: local.kind, reachable: true })
+    for (const profile of await fetchConnectionProfiles(local.id)) {
+      identities.push({ connectionId: local.id, kind: local.kind, label: local.label, profile })
+    }
+  }
+
+  for (const conn of registry.connections) {
+    if (conn.kind === 'local' || conn.kind === 'ssh') continue
+
+    let reachable = false
+    let error: string | undefined
+    let installId: string | undefined
+
+    try {
+      const result = await testConnection(conn.id)
+      reachable = result.ok === true || result.reachable === true
+      if (!reachable) error = result.error ?? 'unreachable'
+      if (result.installId) installId = result.installId
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err)
+    }
+
+    sources.push({ connectionId: conn.id, label: conn.label, kind: conn.kind, reachable, error, installId })
+
+    // Only enumerate profiles for a reachable remote (an unreachable one has
+    // none to route to; it stays listed in sources with its error).
+    if (reachable) {
+      for (const profile of await fetchConnectionProfiles(conn.id)) {
+        identities.push({ connectionId: conn.id, kind: conn.kind, label: conn.label, profile })
+      }
+    }
+  }
+
+  // Duplicate-profile disambiguation (desktop buildAgentRoster): a profile name
+  // appearing on >1 connection gets the @name-device handle; unique keeps bare.
+  const counts = new Map<string, number>()
+  for (const { profile } of identities) counts.set(profile, (counts.get(profile) || 0) + 1)
+
+  const agents: DesktopAgentRoster['agents'] = identities.map(({ connectionId, kind, label, profile }) => ({
+    connectionId,
+    connectionKind: kind,
+    connectionLabel: label,
+    profile,
+    handle: (counts.get(profile) || 0) > 1 ? `${profile}-${labelSlug(label)}` : profile,
+  }))
+
+  return { agents, sources }
+}
+
+/** Credential-free routes across every registry source. The optional profile
+ *  list is only used by the single-local v1 fallback. */
+async function getProfileRoutes(profiles: string[]): Promise<DesktopPluginProfileRoute[]> {
+  const registry = await listConnections()
+  const hasRemote = registry.connections.some(c => c.kind !== 'local' && c.kind !== 'ssh')
+
+  if (!hasRemote) {
+    // Sole-local registry: v1 profile-name routes (byte-identical legacy).
+    return (profiles ?? []).map(profile => ({
+      connectionId: LOCAL_CONNECTION_ID,
+      mode: 'local' as const,
+      profile,
+      targetProfile: profile,
+    }))
+  }
+
+  const routes: DesktopPluginProfileRoute[] = []
+  for (const conn of registry.connections) {
+    if (conn.kind === 'ssh') continue
+    if (conn.kind === 'local') {
+      for (const profile of profiles ?? []) {
+        routes.push({ connectionId: conn.id, mode: 'local', profile, targetProfile: profile })
+      }
+      continue
+    }
+    // Remote/cloud: the connection's own profiles (probed by the caller via
+    // requestProfile when dialed). 'default' is the guaranteed profile.
+    routes.push({ connectionId: conn.id, mode: 'remote', profile: conn.remoteProfile || 'default', targetProfile: conn.remoteProfile || 'default' })
+  }
+  return routes
+}
+
+async function saveConnection(payload: DesktopRegistryConnectionInput): Promise<{ ok: boolean; connection: DesktopRegistryConnection; registry: DesktopConnectionsRegistry }> {
+  return fetchJson<{ ok: boolean; connection: DesktopRegistryConnection; registry: DesktopConnectionsRegistry }>(
+    CONNECTIONS_DOOR,
+    { method: 'PUT', body: JSON.stringify(payload) },
+  )
+}
+
+async function removeConnection(id: string): Promise<{ ok: boolean; registry: DesktopConnectionsRegistry }> {
+  return fetchJson<{ ok: boolean; registry: DesktopConnectionsRegistry }>(
+    `${CONNECTIONS_DOOR}/${encodeURIComponent(id)}`,
+    { method: 'DELETE' },
+  )
+}
+
+async function setPrimaryConnection(id: string): Promise<{ ok: boolean; registry: DesktopConnectionsRegistry }> {
+  return fetchJson<{ ok: boolean; registry: DesktopConnectionsRegistry }>(
+    `${CONNECTIONS_DOOR}/${encodeURIComponent(id)}/primary`,
+    { method: 'POST' },
+  )
+}
+
 // --- terminal: real PTY over /web-term WS -------------------------------------
 
 interface TermSession {
@@ -413,12 +671,24 @@ export function installWebBridge(): void {
       windowButtonPosition: null,
     }),
 
+    // Registry-scoped backend resolution (token never returned; the proxy
+    // injects it server-side).
+    getConnectionFor: async (payload) => getConnectionFor(payload),
+
+    // Union agent roster across every registered source.
+    getAgentRoster,
+
     revalidateConnection: async () => ({ ok: true, rebuilt: false }),
     touchBackend: async () => ({ ok: true }),
-    // Web port: single local backend — no separate profile connections, so no
-    // plugin profile routes to advertise (upstream Electron enumerates the
-    // union connection registry; the web port has none).
-    getProfileRoutes: async () => [],
+    // Credential-free routes across the union connection registry (local +
+    // registered remotes). The web port resolves the profile list from the
+    // local backend's /api/profiles; remotes advertise 'default' (+ their
+    // stored remoteProfile) and are probed by the caller on dial.
+    getProfileRoutes,
+
+    // Registry-scoped WS URL (same contract as getGatewayWsUrl): remotes get
+    // ?connection=<id>, local keeps the ?ticket= path.
+    getGatewayWsUrlFor: async (payload) => getGatewayWsUrlFor(payload),
 
     getGatewayWsUrl: async (profile) => mintWsUrl(profile).then(
       (wsUrl) => ({ ok: true as const, wsUrl }),
@@ -434,13 +704,23 @@ export function installWebBridge(): void {
       method?: string
       body?: unknown
       timeoutMs?: number
+      connectionId?: null | string
+      profile?: null | string
     }): Promise<T> => {
-      const { path, method = 'GET', body, timeoutMs } = request
+      const { path, method = 'GET', body, timeoutMs, connectionId } = request
       const init: RequestInit = { method }
+      const headers: Record<string, string> = {}
       if (body !== undefined) {
-        init.headers = { 'Content-Type': 'application/json' }
+        headers['Content-Type'] = 'application/json'
         init.body = typeof body === 'string' ? body : JSON.stringify(body)
       }
+      // Registry-scoped routing: the proxy resolves the connection id and
+      // injects auth server-side. No (non-local) id → no header → the legacy
+      // local path, byte-identical.
+      if (isNonLocalConnection(connectionId)) {
+        headers['X-Hermes-Connection-Id'] = String(connectionId).trim()
+      }
+      if (Object.keys(headers).length) init.headers = headers
       return fetchJson<T>(path, init, timeoutMs ?? 30_000)
     },
 
@@ -633,20 +913,15 @@ export function installWebBridge(): void {
     oauthLoginConnectionConfig: async () => ({ ok: false, baseUrl: '', connected: false }),
     oauthLogoutConnectionConfig: async () => ({ ok: false, connected: false }),
 
-    // --- v2 multi-connection registry: unsupported in the web port (single
-    // same-origin backend only) — a single implicit local connection. ---------
+    // --- v2 multi-connection registry: proxied CRUD over the local door.
+    // The renderer never receives token bytes (the door redacts); the proxy
+    // injects auth on routed requests. --------------------------------
     connections: {
-      list: async () => ({ version: 1, primary: 'local', secureTokenStorage: false, connections: [] }),
-      save: async () => {
-        throw new Error('unsupported-in-web')
-      },
-      remove: async () => {
-        throw new Error('unsupported-in-web')
-      },
-      setPrimary: async () => {
-        throw new Error('unsupported-in-web')
-      },
-      test: async () => ({ ok: false, reachable: false, error: 'unsupported-in-web', version: null }),
+      list: async () => listConnections(),
+      save: async (payload) => saveConnection(payload),
+      remove: async (id) => removeConnection(id),
+      setPrimary: async (id) => setPrimaryConnection(id),
+      test: async (id) => testConnection(id),
     },
 
     cloud: {

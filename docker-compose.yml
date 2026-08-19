@@ -31,6 +31,9 @@ services:
       - HERMES_PLUGINS_DIR=${HERMES_PLUGINS_DIR:-/plugins}
       # Server-side settings store (theme/plugin prefs sync across devices).
       - HERMES_WEB_SETTINGS_FILE=/data/settings.json
+      # Multi-gateway connections registry (tokens/headers, mode 0600). Same
+      # /data volume as settings so registered gateways survive recreation.
+      - HERMES_WEB_CONNECTIONS_FILE=/data/connections.json
     extra_hosts:
       # Linux: maps host.docker.internal → host's gateway IP. Docker Desktop
       # provides it natively; the entry is a no-op there.

@@ -23,6 +23,9 @@ const zlib = require('zlib');
 const PORT = Number(process.env.PORT) || 4000;
 const TARGET_RAW = process.env.HERMES_TARGET || '127.0.0.1:9119';
 
+// Multi-connection registry: secret-file store + CRUD (see connections-store.js).
+const connectionsStore = require('./connections-store');
+
 // Serve the SPA bundle from web/dist by default; DIST_DIR overrides for
 // testing an alternate build (e.g. a gate-stripped diagnostic bundle).
 const DIST = process.env.DIST_DIR ? path.resolve(process.env.DIST_DIR) : path.resolve(__dirname, '..', 'web', 'dist');
@@ -68,6 +71,63 @@ function parseTarget() {
   const protocol = u.protocol === 'https:' ? 'https:' : 'http:';
   const port = u.port || (protocol === 'https:' ? '443' : '80');
   return { protocol, hostname: u.hostname, port, host: u.host };
+}
+
+// ── Multi-gateway routing ───────────────────────────────────────────────────
+// A non-local request (REST or WS) carries the registry connection id; the
+// proxy looks up the stored connection and forwards to ITS url, injecting
+// X-Hermes-Session-Token + the connection's extra headers server-side. The
+// browser never sees or sends the token and never hits the remote origin
+// directly (CORS + secret safety). No connection id → legacy single-backend
+// path (HERMES_TARGET, no auth injection) — byte-identical behavior.
+
+function parseRemoteTarget(rawUrl) {
+  const u = new URL(rawUrl);
+  const protocol = u.protocol === 'https:' ? 'https:' : 'http:';
+  const port = u.port || (protocol === 'https:' ? '443' : '80');
+  return { protocol, hostname: u.hostname, port, host: u.host, basePath: u.pathname.replace(/\/+$/, '') };
+}
+
+// Resolve the upstream for a request: null → the local HERMES_TARGET.
+// Throws with a status when the connection is missing or malformed.
+function resolveRoute(req) {
+  const connectionId = req.headers['x-hermes-connection-id'];
+  if (!connectionId || connectionId === connectionsStore.LOCAL_CONNECTION_ID) {
+    return null;
+  }
+  const conn = connectionsStore.get(connectionId);
+  if (!conn) {
+    const err = new Error(`no connection with id "${connectionId}"`);
+    err.status = 404;
+    throw err;
+  }
+  if (!conn.url) {
+    const err = new Error(`connection "${conn.label}" has no url`);
+    err.status = 400;
+    throw err;
+  }
+  return { conn, target: parseRemoteTarget(conn.url) };
+}
+
+// Auth + extra headers for a remote upstream. The client's own header is
+// consumed for routing and NEVER forwarded upstream (HOP_BY_HOP hygiene).
+function remoteUpstreamHeaders(headers, target, conn, base) {
+  const out = {};
+  for (const [k, v] of Object.entries(headers || {})) {
+    if (v === undefined) continue;
+    const lk = k.toLowerCase();
+    if (HOP_BY_HOP.has(lk)) continue;
+    if (lk === 'x-hermes-connection-id') continue;
+    out[k] = v;
+  }
+  if (conn.token) out['X-Hermes-Session-Token'] = conn.token;
+  if (Array.isArray(conn.headers)) {
+    for (const h of conn.headers) {
+      if (h && h.name) out[h.name] = String(h.value ?? '');
+    }
+  }
+  out.host = target.host;
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -119,17 +179,29 @@ function upgradeHeaders(req, target) {
 // ---------------------------------------------------------------------------
 
 function proxyHttp(req, res) {
-  const target = parseTarget();
+  let route;
+  try {
+    route = resolveRoute(req);
+  } catch (err) {
+    res.writeHead(err.status || 502, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: err.message || String(err) }));
+    return;
+  }
+
+  const target = route ? route.target : parseTarget();
   const mod = target.protocol === 'https:' ? https : http;
+  const headers = route
+    ? remoteUpstreamHeaders(req.headers, target, route.conn, parseTarget().host)
+    : forwardHeaders(req.headers, target);
 
   const upstream = mod.request(
     {
       protocol: target.protocol,
       hostname: target.hostname,
       port: target.port,
-      path: req.url,
+      path: route ? route.target.basePath + req.url : req.url,
       method: req.method,
-      headers: forwardHeaders(req.headers, target),
+      headers,
     },
     (upRes) => {
       const headers = {};
@@ -160,39 +232,99 @@ function proxyHttp(req, res) {
 // ---------------------------------------------------------------------------
 
 function proxyUpgrade(req, socket, head) {
-  const target = parseTarget();
+  // Unhandled 'error' on the raw client socket (RST before/while the upstream
+  // dials) would crash the process; absorb it — the close/teardown handlers
+  // below own destruction.
+  socket.on('error', () => {});
+  req.on('error', () => {});
+
+  // The bridge dials remotes with ?connection=<id> (browsers cannot set WS
+  // handshake headers); normalize it onto the routing header and strip it
+  // from the upstream URL so the remote gateway never sees the proxy-side id.
+  try {
+    const u0 = new URL(req.url, 'http://localhost');
+    const connParam = u0.searchParams.get('connection');
+    if (connParam && !req.headers['x-hermes-connection-id']) {
+      req.headers['x-hermes-connection-id'] = connParam;
+      u0.searchParams.delete('connection');
+      req.url = u0.pathname + u0.search;
+    }
+  } catch {
+    /* malformed URL → fall through to the normal path */
+  }
+
+  let route;
+  try {
+    route = resolveRoute(req);
+  } catch (err) {
+    const status = err.status || 502;
+    try {
+      socket.write(`HTTP/1.1 ${status} ${status === 404 ? 'Not Found' : 'Bad Request'}\r\nConnection: close\r\n\r\n`);
+    } catch {
+      /* socket already gone */
+    }
+    socket.destroy();
+    return;
+  }
+
+  const target = route ? route.target : parseTarget();
   const mod = target.protocol === 'https:' ? https : http;
+
+  // Remote upgrades carry ?connection=<id>; the token is injected HERE
+  // (server-side) and must not be part of the same-origin URL the browser
+  // sees. Local upgrades keep the client's URL verbatim (ticket path).
+  let upstreamPath = req.url;
+  let upstreamHeaders;
+  if (route) {
+    const u = new URL(req.url, 'http://localhost');
+    u.searchParams.set('token', route.conn.token || '');
+    upstreamPath = route.target.basePath + u.pathname + u.search;
+    upstreamHeaders = remoteUpstreamHeaders(req.headers, target, route.conn, parseTarget().host);
+  } else {
+    upstreamHeaders = upgradeHeaders(req, target);
+  }
 
   const upstream = mod.request({
     protocol: target.protocol,
     hostname: target.hostname,
     port: target.port,
     method: req.method,
-    path: req.url,
-    headers: upgradeHeaders(req, target),
+    path: upstreamPath,
+    headers: upstreamHeaders,
   });
 
   upstream.on('upgrade', (upRes, upSocket, upHead) => {
     socket.setNoDelay(true);
     upSocket.setNoDelay(true);
+    upSocket.on('error', () => {});
 
     // node's raw 'upgrade' event does not write the handshake reply — the
     // proxy must serialize the backend's 101 back to the client itself.
-    socket.write(`HTTP/1.1 101 ${upRes.statusMessage || 'Switching Protocols'}\r\n`);
-    socket.write('Upgrade: websocket\r\n');
-    socket.write('Connection: Upgrade\r\n');
-    for (const [k, v] of Object.entries(upRes.headers)) {
-      if (v === undefined) continue;
-      const lk = k.toLowerCase();
-      if (lk === 'connection' || lk === 'upgrade') continue;
-      if (HOP_BY_HOP.has(lk)) continue;
-      socket.write(`${k}: ${Array.isArray(v) ? v.join(', ') : v}\r\n`);
-    }
-    socket.write('\r\n');
+    try {
+      socket.write(`HTTP/1.1 101 ${upRes.statusMessage || 'Switching Protocols'}\r\n`);
+      socket.write('Upgrade: websocket\r\n');
+      socket.write('Connection: Upgrade\r\n');
+      for (const [k, v] of Object.entries(upRes.headers)) {
+        if (v === undefined) continue;
+        const lk = k.toLowerCase();
+        if (lk === 'connection' || lk === 'upgrade') continue;
+        if (HOP_BY_HOP.has(lk)) continue;
+        socket.write(`${k}: ${Array.isArray(v) ? v.join(', ') : v}\r\n`);
+      }
+      socket.write('\r\n');
 
-    // Forward any bytes already buffered on either side of the handshake.
-    if (upHead && upHead.length) socket.write(upHead);
-    if (head && head.length) upSocket.write(head);
+      // Forward any bytes already buffered on either side of the handshake.
+      if (upHead && upHead.length) socket.write(upHead);
+      if (head && head.length) upSocket.write(head);
+    } catch {
+      try {
+        upSocket.destroy();
+      } catch {
+        /* ignore */
+      }
+      socket.destroy();
+      return;
+    }
 
     socket.pipe(upSocket);
     upSocket.pipe(socket);
@@ -218,19 +350,31 @@ function proxyUpgrade(req, socket, head) {
   // Backend rejected the upgrade (e.g. HTTP 403 auth failure). Mirror its
   // status + headers + body back to the client verbatim.
   upstream.on('response', (upRes) => {
-    const statusLine = `HTTP/1.1 ${upRes.statusCode} ${upRes.statusMessage || ''}\r\n`;
-    socket.write(statusLine);
-    for (const [k, v] of Object.entries(upRes.headers)) {
-      if (v === undefined) continue;
-      if (HOP_BY_HOP.has(k.toLowerCase())) continue;
-      socket.write(`${k}: ${Array.isArray(v) ? v.join(', ') : v}\r\n`);
+    try {
+      const statusLine = `HTTP/1.1 ${upRes.statusCode} ${upRes.statusMessage || ''}\r\n`;
+      socket.write(statusLine);
+      for (const [k, v] of Object.entries(upRes.headers)) {
+        if (v === undefined) continue;
+        if (HOP_BY_HOP.has(k.toLowerCase())) continue;
+        socket.write(`${k}: ${Array.isArray(v) ? v.join(', ') : v}\r\n`);
+      }
+      socket.write('\r\n');
+      upRes.pipe(socket);
+    } catch {
+      socket.destroy();
     }
-    socket.write('\r\n');
-    upRes.pipe(socket);
   });
 
-  upstream.on('error', () => {
-    socket.write('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n');
+  upstream.on('error', (err) => {
+    try {
+      if (err && (err.code === 'ECONNREFUSED' || err.code === 'ECONNRESET')) {
+        socket.write(`HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n${String(err.code)}\n`);
+      } else {
+        socket.write('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n');
+      }
+    } catch {
+      /* socket gone */
+    }
     socket.destroy();
   });
 
@@ -1015,6 +1159,169 @@ function serveSettings(req, res) {
 }
 
 // ---------------------------------------------------------------------------
+// Connections registry door (web port) — the v2 multi-connection registry
+// ---------------------------------------------------------------------------
+// Served BY the proxy (local, never forwarded — must precede the generic
+// /api/* forward). Tokens/header values never cross to the browser:
+//   GET    /web-connections             → redacted registry
+//   PUT    /web-connections             → save/upsert (accepts plaintext)
+//   DELETE /web-connections/<id>        → remove (retarget primary to local)
+//   POST   /web-connections/<id>/primary→ set primary
+//   POST   /web-connections/<id>/test   → proxy probes <url>/api/status
+//
+// Probe flow: the proxy performs the HTTP call (the browser can't — CORS +
+// the token never leaves the server). GET <url>/api/status is public
+// (unauthenticated); auth errors (401/403) mean the gateway is up but the
+// stored token is wrong/absent.
+
+function serveConnections(req, res) {
+  const u = new URL(req.url, 'http://localhost');
+
+  if (u.pathname === '/web-connections') {
+    if (req.method === 'GET') {
+      sendJson(res, 200, connectionsStore.list());
+      return;
+    }
+    if (req.method === 'PUT') {
+      readJsonBody(req, (err, body) => {
+        if (err) return sendJson(res, 400, { error: 'bad_body', detail: String(err && err.message || err) });
+        try {
+          const result = connectionsStore.save(body);
+          sendJson(res, 200, result);
+        } catch (saveErr) {
+          sendJson(res, saveErr.status || 500, { error: saveErr.message || String(saveErr) });
+        }
+      });
+      return;
+    }
+    sendJson(res, 405, { error: 'method_not_allowed', Allow: 'GET, PUT' });
+    return;
+  }
+
+  const m = /^\/web-connections\/([^/]+)(?:\/(primary|test))?$/.exec(u.pathname);
+  if (!m) {
+    sendJson(res, 404, { error: 'not_found' });
+    return;
+  }
+  const id = decodeURIComponent(m[1]);
+  const action = m[2] || null;
+
+  if (action === null && req.method === 'DELETE') {
+    try {
+      sendJson(res, 200, connectionsStore.remove(id));
+    } catch (removeErr) {
+      sendJson(res, removeErr.status || 500, { error: removeErr.message || String(removeErr) });
+    }
+    return;
+  }
+
+  if (action === 'primary' && req.method === 'POST') {
+    try {
+      sendJson(res, 200, connectionsStore.setPrimary(id));
+    } catch (primaryErr) {
+      sendJson(res, primaryErr.status || 500, { error: primaryErr.message || String(primaryErr) });
+    }
+    return;
+  }
+
+  if (action === 'test' && req.method === 'POST') {
+    const conn = connectionsStore.get(id);
+    if (!conn) {
+      sendJson(res, 404, { error: `no connection with id "${id}"` });
+      return;
+    }
+    testConnection(conn)
+      .then((result) => sendJson(res, 200, result))
+      .catch((testErr) => sendJson(res, 502, { error: 'test_failed', detail: String(testErr && testErr.message || testErr) }));
+    return;
+  }
+
+  sendJson(res, 405, { error: 'method_not_allowed', Allow: 'DELETE, POST' });
+}
+
+// Probe one remote gateway: GET <url>/api/status (public). Reachable = the
+// gateway answered; ok = the stored token authenticated (401/403 → token
+// wrong/absent but host reachable).
+function testConnection(conn) {
+  const target = parseRemoteTarget(conn.url);
+  const mod = target.protocol === 'https:' ? https : http;
+  const headers = { Host: target.host };
+  if (conn.token) headers['X-Hermes-Session-Token'] = conn.token;
+  if (Array.isArray(conn.headers)) {
+    for (const h of conn.headers) {
+      if (h && h.name) headers[h.name] = String(h.value ?? '');
+    }
+  }
+
+  return new Promise((resolve) => {
+    const req = mod.request(
+      {
+        protocol: target.protocol,
+        hostname: target.hostname,
+        port: target.port,
+        path: `${target.basePath}/api/status`,
+        method: 'GET',
+        headers,
+        timeout: 10_000,
+      },
+      (upRes) => {
+        const chunks = [];
+        upRes.on('data', (c) => chunks.push(c));
+        upRes.on('end', () => {
+          let status = null;
+          try {
+            status = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          } catch {
+            /* non-JSON body — still reachable */
+          }
+          const authFailed = upRes.statusCode === 401 || upRes.statusCode === 403;
+          const result = {
+            ok: upRes.statusCode >= 200 && upRes.statusCode < 300,
+            reachable: true,
+            error: authFailed
+              ? `gateway reachable but auth failed (HTTP ${upRes.statusCode})`
+              : upRes.statusCode >= 400
+                ? `gateway answered HTTP ${upRes.statusCode}`
+                : null,
+          };
+          if (status && typeof status === 'object') {
+            if (typeof status.version === 'string') result.version = status.version;
+            if (typeof status.install_id === 'string' && status.install_id) {
+              result.installId = status.install_id;
+              // Remember the last-known backend identity for the dedup hint.
+              try {
+                const registry = connectionsStore.loadRegistry();
+                const stored = registry.connections.find((c) => c.id === conn.id);
+                if (stored && stored.installId !== status.install_id) {
+                  stored.installId = status.install_id;
+                  connectionsStore.saveRegistry(registry);
+                }
+              } catch {
+                /* best-effort */
+              }
+            }
+          }
+          resolve(result);
+        });
+      },
+    );
+    req.on('timeout', () => {
+      req.destroy();
+      resolve({ ok: false, reachable: false, error: 'timed out probing gateway', version: null });
+    });
+    req.on('error', (err) => {
+      resolve({
+        ok: false,
+        reachable: false,
+        error: err.code === 'ECONNREFUSED' ? 'connection refused' : String(err.message || err),
+        version: null,
+      });
+    });
+    req.end();
+  });
+}
+
+// ---------------------------------------------------------------------------
 // VS Code Marketplace door
 // ---------------------------------------------------------------------------
 // The renderer's theme marketplace used to be Electron-main-only
@@ -1065,6 +1372,12 @@ const server = http.createServer((req, res) => {
     serveWebFs(req, res);
     return;
   }
+  // Connections registry door (multi-gateway CRUD + test probe) — local, not
+  // forwarded; secrets stay server-side.
+  if (req.url.startsWith('/web-connections')) {
+    serveConnections(req, res);
+    return;
+  }
   // Server-side settings store (theme/plugin prefs follow the user across
   // devices) — local, not forwarded.
   if (req.url.startsWith('/web-settings')) {
@@ -1104,6 +1417,8 @@ server.on('upgrade', (req, socket, head) => {
     socket.destroy();
     return;
   }
+  // Remote gateways dial through ?connection=<id> (token injected server-side);
+  // no param → the local HERMES_TARGET ticket path, unchanged.
   proxyUpgrade(req, socket, head);
 });
 
