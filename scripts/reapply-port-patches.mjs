@@ -485,7 +485,7 @@ import { useIsMobile } from '@/hooks/use-mobile'`,
 )
 patchFile(
   'components/pane-shell/tree/renderer/tree-group.tsx',
-  "// Web port (mobile): keep the strip when the zone holds a session tab",
+  'a lone session tab auto-hides the strip upstream',
   'const headerVisible = !isEmpty && !verticalCollapse && (Boolean(node.minimized) || !headerHidden)',
   `// Web port (mobile): a lone session tab auto-hides the strip upstream,
   // stranding the tab (no hold/close affordance on touch). Keep the strip
@@ -783,7 +783,7 @@ patchFile(
 // chip, so a tap opens (and a pinned re-tap closes) the collapsed pane.
 patchFile(
   'components/pane-shell/tree/renderer/narrow-overlays.tsx',
-  'Web port (mobile): tappable narrow-overlay edge strips',
+  'visible grip so a collapsed pane has a touch',
   `      {sides.map(side => (
         <div
           className={cn('absolute inset-y-0 z-30 w-1.5', side === 'left' ? 'left-0' : 'right-0')}
@@ -881,7 +881,7 @@ function saveDeselected(): void {
 
 patchFile(
   'store/session-pin-sync.ts',
-  'Web port (mobile): unpin survives slow/failed PATCH — pull fence',
+  'a user-initiated unpin whose PATCH',
   `    if (pending.has(pinId) || pending.has(row.id)) {
       continue
     }
@@ -908,7 +908,7 @@ patchFile(
 
 patchFile(
   'store/session-pin-sync.ts',
-  'Web port (mobile): unpin survives slow/failed PATCH — retry',
+  'a failed unpin PATCH must not be swallowed',
   `  // Unpinned: anything we were tracking that's no longer in the set.
   for (const id of [...mirrored, ...pending]) {
     if (!current.has(id)) {
@@ -944,7 +944,7 @@ patchFile(
 
 patchFile(
   'store/session-pin-sync.ts',
-  'Web port (mobile): unpin survives slow/failed PATCH — reset',
+  'unconfirmed.clear()',
   `export function resetSessionPinMirror(): void {
   mirrored.clear()
   pending.clear()
