@@ -16,7 +16,10 @@
  */
 
 import driverCss from 'driver.js/dist/driver.css?raw'
-import driverIifeRaw from 'driver.js/dist/driver.js.iife.js?raw'
+// Web port: driver.js's exports map hides the IIFE path; a bare import
+// forces externalization (bare specifier in the browser → white page). Use
+// the hoisted repo-root file directly so Vite bundles the raw string.
+import driverIifeRaw from '../../../../../node_modules/driver.js/dist/driver.js.iife.js?raw'
 
 import { collectTourTargets } from '@/lib/tour/collect-targets'
 import { runTourEngine, type TourAction, type TourResult } from '@/lib/tour/engine'

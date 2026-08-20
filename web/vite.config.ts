@@ -104,14 +104,12 @@ export default defineConfig(({ command }) => ({
     // imports stay lazy, and the file count stays in the tens.
     chunkSizeWarningLimit: 25000,
     rolldownOptions: {
-      // Web port: externalize ONLY the driver.js IIFE raw payload (it is
-      // injected as a string into the preview guest page — bundling it would
-      // turn the ?raw import into an asset URL, breaking the inject-and-run
-      // script). The CSS side-effect import (`driver.js/dist/driver.css`) must
-      // NOT be external: in a browser a bare specifier can't resolve, which
-      // white-screens the app. Upstream's broad `startsWith('driver.js/')`
-      // caught both; narrow to the IIFE only.
-      external: (id: string) => id.startsWith('driver.js/') && id.includes('.iife.js'),
+      // Web port: driver.js exports map doesn't expose the IIFE path, so
+      // upstream externalized driver.js/*. A bare specifier in the emitted
+      // bundle fails in the browser (white page). The IIFE + CSS are resolved
+      // via the patcher's relative-path rewrites in preview-tour.ts /
+      // run-tour.ts, so nothing needs to be external here.
+      external: () => false,
       output: {
         inlineDynamicImports: true,
         advancedChunks: {

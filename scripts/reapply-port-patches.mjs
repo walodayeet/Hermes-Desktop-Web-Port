@@ -616,6 +616,27 @@ patchFile(
       },`,
 )
 
+// --- app/chat/right-rail/preview-tour.ts: resolve driver.js IIFE via path ---
+// driver.js's exports map does NOT expose `./dist/driver.js.iife.js`, so Vite
+// can't bundle `driver.js/dist/driver.js.iife.js?raw`. Upstream externalizes
+// driver.js/*, which leaves a bare specifier in the emitted bundle — in the
+// browser that fails module resolution → white screen. Import the IIFE by
+// RELATIVE path (Vite resolves it, `?raw` bundles the string, exports map
+// bypassed). The file is hoisted to the repo-root node_modules.
+patchFile(
+  'app/chat/right-rail/preview-tour.ts',
+  'Web port: driver.js IIFE via relative path (exports map bypass)',
+  `import driverIifeRaw from 'driver.js/dist/driver.js.iife.js?raw'`,
+  `// Web port: driver.js's exports map hides the IIFE path; a bare import
+// forces externalization (bare specifier in the browser → white page). Use
+// the hoisted repo-root file directly so Vite bundles the raw string.
+import driverIifeRaw from '../../../../../node_modules/driver.js/dist/driver.js.iife.js?raw'`,
+)
+
+// --- app/chat/right-rail/preview-tour.ts: resolve driver.js CSS via path -----
+// Same exports-map story for the CSS? No — `./dist/driver.css` IS exported.
+// But keep it bundled: with external off it resolves normally. No patch needed.
+
 // --- tree-group.tsx: mobile tab strip visibility -------------------------------
 // Upstream hides the header strip for a lone tab (shown.length <= 1) and for
 // full-page views (headerVeto). On desktop that's fine — ⌘W / right-click
