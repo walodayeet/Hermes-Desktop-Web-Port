@@ -3,7 +3,7 @@ import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 import type { NavigateFunction } from 'react-router'
 
 import { graftRefreshedTailOntoBackfill } from '@/app/chat/transcript-backfill'
-import { revealTreePane } from '@/components/pane-shell/tree/store'
+import { $narrowViewport, revealTreePane } from '@/components/pane-shell/tree/store'
 import { deleteSession, getAllSessionMessages, getLatestSessionMessages, setSessionArchived } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { type ChatMessage, preserveLocalAssistantErrors, toChatMessages } from '@/lib/chat-messages'
@@ -568,6 +568,14 @@ export function useSessionActions({
    *  first message persists a turn. "Open in split" keeps the listed behavior. */
   const openNewSessionTile = useCallback(
     async (dir: TileDock = 'right', options?: { cwd?: null | string; listed?: boolean }) => {
+      // Web port (mobile): no split on narrow — a "new tab" request reuses the
+      // single workspace as a fresh draft instead of stacking a tile.
+      if ($narrowViewport.get()) {
+        startFreshSessionDraft()
+
+        return
+      }
+
       const listed = options?.listed ?? true
 
       try {

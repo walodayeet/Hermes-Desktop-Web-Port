@@ -10,7 +10,7 @@ import type { ReadableAtom } from 'nanostores'
 import type { ReactElement, ReactNode, PointerEvent as ReactPointerEvent } from 'react'
 
 import type { DoubleTapContext } from '@/components/pane-shell/tree/renderer/drag-session'
-import { registerPaneCloser, removeTreePane, treePanesWithPrefix } from '@/components/pane-shell/tree/store'
+import { $narrowViewport, registerPaneCloser, removeTreePane, treePanesWithPrefix } from '@/components/pane-shell/tree/store'
 import { registry } from '@/contrib/registry'
 import type { TileDock } from '@/store/session-states'
 
@@ -61,7 +61,10 @@ export function paneMirror<T>(cfg: PaneMirror<T>): () => void {
   const paneId = (key: string) => `${cfg.prefix}:${key}`
 
   const sync = () => {
-    const tiles = cfg.source.get()
+    // Web port (mobile): no split-screen tiles on a narrow viewport — treat
+    // the source as empty so nothing registers, and the dispose + prune loops
+    // below evict any already-registered tile pane.
+    const tiles = $narrowViewport.get() ? [] : cfg.source.get()
     const wanted = new Set(tiles.map(cfg.key))
 
     for (const tile of tiles) {

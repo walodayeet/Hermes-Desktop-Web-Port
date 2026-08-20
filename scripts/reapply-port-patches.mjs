@@ -1223,6 +1223,55 @@ patchFile(
     }`,
 )
 
+// --- mobile single-surface: no split-screen tiles on narrow viewports ------
+// On a phone/tablet there is one workspace surface; session tiles and route
+// (page) tiles dock BESIDE main (pos:'right'/'center') via paneMirror and would
+// split the screen (and persist, then re-split on boot). The narrow gate has
+// three legs:
+//   1. pane-mirror.sync()  — the render funnel for BOTH tile types: on narrow
+//      it registers nothing and disposes any already-registered tile pane, so
+//      even restored-from-storage tiles never render a split.
+//   2. openSessionTile     — no-op on narrow (no tile state accumulates, so
+//      nothing persists to resurrect a split on rotate or next boot).
+//   3. openNewSessionTile  — on narrow a "new tab" becomes a fresh draft in
+//      the single workspace (replace, not stack).
+patchFile(
+  'app/chat/pane-mirror.ts',
+  '$narrowViewport, registerPaneCloser',
+  "import { registerPaneCloser, removeTreePane, treePanesWithPrefix } from '@/components/pane-shell/tree/store'",
+  "import { $narrowViewport, registerPaneCloser, removeTreePane, treePanesWithPrefix } from '@/components/pane-shell/tree/store'",
+)
+patchFile(
+  'app/chat/pane-mirror.ts',
+  'Web port (mobile): no split-screen tiles',
+  '  const sync = () => {\n    const tiles = cfg.source.get()\n    const wanted = new Set(tiles.map(cfg.key))',
+  '  const sync = () => {\n    // Web port (mobile): no split-screen tiles on a narrow viewport — treat\n    // the source as empty so nothing registers, and the dispose + prune loops\n    // below evict any already-registered tile pane.\n    const tiles = $narrowViewport.get() ? [] : cfg.source.get()\n    const wanted = new Set(tiles.map(cfg.key))',
+)
+patchFile(
+  'store/session-states.ts',
+  '$narrowViewport,',
+  '  $activeTreeGroup,\n  $layoutTree,',
+  '  $activeTreeGroup,\n  $layoutTree,\n  $narrowViewport,',
+)
+patchFile(
+  'store/session-states.ts',
+  'Web port (mobile): single-surface',
+  '  const tiles = $sessionTiles.get()\n\n  // Opening a session in a tab/tile is "reading" it',
+  '  // Web port (mobile): single-surface — a narrow viewport has no room for a\n  // split tile; opening a session here instead surfaces in main (the callers\n  // with a navigate handle route it in-place, not as a tile).\n  if ($narrowViewport.get()) {\n    return\n  }\n\n  const tiles = $sessionTiles.get()\n\n  // Opening a session in a tab/tile is "reading" it',
+)
+patchFile(
+  'app/session/hooks/use-session-actions/index.ts',
+  '$narrowViewport, revealTreePane',
+  "import { revealTreePane } from '@/components/pane-shell/tree/store'",
+  "import { $narrowViewport, revealTreePane } from '@/components/pane-shell/tree/store'",
+)
+patchFile(
+  'app/session/hooks/use-session-actions/index.ts',
+  'Web port (mobile): no split on narrow',
+  '    async (dir: TileDock = \'right\', options?: { cwd?: null | string; listed?: boolean }) => {\n      const listed = options?.listed ?? true',
+  '    async (dir: TileDock = \'right\', options?: { cwd?: null | string; listed?: boolean }) => {\n      // Web port (mobile): no split on narrow — a "new tab" request reuses the\n      // single workspace as a fresh draft instead of stacking a tile.\n      if ($narrowViewport.get()) {\n        startFreshSessionDraft()\n\n        return\n      }\n\n      const listed = options?.listed ?? true',
+)
+
 if (touched === 0) {
   console.log('no patches applied (all present)')
 } else {

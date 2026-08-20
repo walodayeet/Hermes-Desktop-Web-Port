@@ -24,6 +24,7 @@ import { findGroup, findGroupOfPane, type LayoutNode } from '@/components/pane-s
 import {
   $activeTreeGroup,
   $layoutTree,
+  $narrowViewport,
   focusedSessionTabAnchor,
   moveTreePane,
   noteActiveTreeGroup,
@@ -754,6 +755,13 @@ export function openSessionTile(
   anchor?: string,
   before?: null | string
 ) {
+  // Web port (mobile): single-surface — a narrow viewport has no room for a
+  // split tile; opening a session here instead surfaces in main (the callers
+  // with a navigate handle route it in-place, not as a tile).
+  if ($narrowViewport.get()) {
+    return
+  }
+
   const tiles = $sessionTiles.get()
 
   // Opening a session in a tab/tile is "reading" it — clear its unread dot
