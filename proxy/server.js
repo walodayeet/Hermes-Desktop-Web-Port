@@ -26,6 +26,17 @@ const TARGET_RAW = process.env.HERMES_TARGET || '127.0.0.1:9119';
 // Multi-connection registry: secret-file store + CRUD (see connections-store.js).
 const connectionsStore = require('./connections-store');
 
+// RFC 8252 native-PKCE OAuth relay: the proxy plays the loopback listener for
+// gated gateways (a browser tab can't listen on a port). Tokens are stored on
+// the registry connection (0600 file) and injected as `Authorization: Bearer`
+// on routed requests — the browser never sees them.
+const oauthRelay = createOauthRelay();
+
+function createOauthRelay() {
+  const { createOauthRelay: makeRelay } = require('./oauth-relay');
+  return makeRelay({ store: connectionsStore });
+}
+
 // Serve the SPA bundle from web/dist by default; DIST_DIR overrides for
 // testing an alternate build (e.g. a gate-stripped diagnostic bundle).
 const DIST = process.env.DIST_DIR ? path.resolve(process.env.DIST_DIR) : path.resolve(__dirname, '..', 'web', 'dist');
@@ -111,6 +122,10 @@ function resolveRoute(req) {
 
 // Auth + extra headers for a remote upstream. The client's own header is
 // consumed for routing and NEVER forwarded upstream (HOP_BY_HOP hygiene).
+// OAuth connections authenticate with `Authorization: Bearer` (refreshed
+// near expiry) and do NOT send X-Hermes-Session-Token — the bearer is
+// authoritative. A refresh failure leaves the existing token in place so a
+// transient IDP outage degrades to a 401 from the gateway instead of a 502.
 function remoteUpstreamHeaders(headers, target, conn, base) {
   const out = {};
   for (const [k, v] of Object.entries(headers || {})) {
@@ -120,7 +135,17 @@ function remoteUpstreamHeaders(headers, target, conn, base) {
     if (lk === 'x-hermes-connection-id') continue;
     out[k] = v;
   }
-  if (conn.token) out['X-Hermes-Session-Token'] = conn.token;
+  if (conn.oauth && conn.oauth.accessToken) {
+    if (oauthRelay.bearer) {
+      // Fire-and-forget: the token may be refreshed in place before the
+      // upstream dial completes. If the refresh fails we keep the old
+      // access token — the gateway's 401 then surfaces the real state.
+      oauthRelay.bearer(conn.id).catch(() => {});
+    }
+    out['Authorization'] = `Bearer ${conn.oauth.accessToken}`;
+  } else if (conn.token) {
+    out['X-Hermes-Session-Token'] = conn.token;
+  }
   if (Array.isArray(conn.headers)) {
     for (const h of conn.headers) {
       if (h && h.name) out[h.name] = String(h.value ?? '');
@@ -193,6 +218,16 @@ function proxyHttp(req, res) {
   const headers = route
     ? remoteUpstreamHeaders(req.headers, target, route.conn, parseTarget().host)
     : forwardHeaders(req.headers, target);
+
+  // Stale oauth connection (no usable token): surface a structured 401 so the
+  // UI can offer re-login instead of a 502 bad_gateway. The refresh inside
+  // remoteUpstreamHeaders already raced to rotate the token in place; if it
+  // succeeded the upstream dial below authenticates normally.
+  if (route && route.conn.oauth && !route.conn.oauth.accessToken) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'oauth_expired', detail: 'oauth sign-in expired; reconnect' }));
+    return;
+  }
 
   const upstream = mod.request(
     {
@@ -277,7 +312,11 @@ function proxyUpgrade(req, socket, head) {
   let upstreamHeaders;
   if (route) {
     const u = new URL(req.url, 'http://localhost');
-    u.searchParams.set('token', route.conn.token || '');
+    // OAuth connections authenticate via the Authorization header the proxy
+    // injects; ?token= is not sent (and is rejected in gated mode anyway).
+    if (!route.conn.oauth || !route.conn.oauth.accessToken) {
+      u.searchParams.set('token', route.conn.token || '');
+    }
     upstreamPath = route.target.basePath + u.pathname + u.search;
     upstreamHeaders = remoteUpstreamHeaders(req.headers, target, route.conn, parseTarget().host);
   } else {
@@ -1168,11 +1207,16 @@ function serveSettings(req, res) {
 //   DELETE /web-connections/<id>        → remove (retarget primary to local)
 //   POST   /web-connections/<id>/primary→ set primary
 //   POST   /web-connections/<id>/test   → proxy probes <url>/api/status
+//   POST   /web-connections/<id>/oauth/begin      → start native-PKCE relay
+//   GET    /web-connections/<id>/oauth/status     → { connected, expiresAt, provider }
+//   POST   /web-connections/<id>/oauth/disconnect → clear stored tokens
 //
-// Probe flow: the proxy performs the HTTP call (the browser can't — CORS +
-// the token never leaves the server). GET <url>/api/status is public
-// (unauthenticated); auth errors (401/403) mean the gateway is up but the
-// stored token is wrong/absent.
+// OAuth routes: the proxy relays the RFC 8252 native-PKCE flow (it owns the
+// loopback listener; a browser tab can't listen on a port). begin returns
+// { authorizeUrl, redirectUri, baseUrl } — the renderer opens authorizeUrl in
+// a new tab; the proxy completes the token exchange asynchronously, stores the
+// tokens on the connection (0600 file), and injects `Authorization: Bearer`
+// on forwarded requests. Browser never sees token bytes.
 
 function serveConnections(req, res) {
   const u = new URL(req.url, 'http://localhost');
@@ -1198,13 +1242,14 @@ function serveConnections(req, res) {
     return;
   }
 
-  const m = /^\/web-connections\/([^/]+)(?:\/(primary|test))?$/.exec(u.pathname);
+  const m = /^\/web-connections\/([^/]+)(?:\/(primary|test|oauth(?:\/(begin|status|disconnect))?))?$/.exec(u.pathname);
   if (!m) {
     sendJson(res, 404, { error: 'not_found' });
     return;
   }
   const id = decodeURIComponent(m[1]);
   const action = m[2] || null;
+  const oauthAction = m[3] || null;
 
   if (action === null && req.method === 'DELETE') {
     try {
@@ -1236,7 +1281,54 @@ function serveConnections(req, res) {
     return;
   }
 
-  sendJson(res, 405, { error: 'method_not_allowed', Allow: 'DELETE, POST' });
+  // OAuth relay routes: begin → { authorizeUrl, redirectUri, baseUrl };
+  // status → { connected, expiresAt, provider }; disconnect → clear tokens.
+  // (m[2] carries 'oauth' or 'oauth/begin'; m[3] is the precise sub-action.)
+  if (oauthAction === 'begin' && req.method === 'POST') {
+    readJsonBody(req, (bodyErr, body) => {
+      if (bodyErr) return sendJson(res, 400, { error: 'bad_body' });
+      const provider = body && typeof body.provider === 'string' ? body.provider : '';
+      const key = body && typeof body.url === 'string' && body.url.trim()
+        ? body.url.trim()
+        : id;
+      oauthRelay
+        .begin(key, provider)
+        .then((result) => sendJson(res, 200, { ok: true, ...result }))
+        .catch((oauthErr) =>
+          sendJson(res, oauthErr.status || 502, {
+            ok: false,
+            error: oauthErr.code === 'native_pkce_unavailable' ? 'native_pkce_unavailable' : oauthErr.message || String(oauthErr),
+          })
+        );
+    });
+    return;
+  }
+
+  if (oauthAction === 'status' && req.method === 'GET') {
+    try {
+      sendJson(res, 200, oauthRelay.status(id));
+    } catch (statusErr) {
+      sendJson(res, statusErr.status || 500, { error: statusErr.message || String(statusErr) });
+    }
+    return;
+  }
+
+  if (oauthAction === 'disconnect' && req.method === 'POST') {
+    readJsonBody(req, (bodyErr, body) => {
+      if (bodyErr) return sendJson(res, 400, { error: 'bad_body' });
+      const key = body && typeof body.url === 'string' && body.url.trim()
+        ? body.url.trim()
+        : id;
+      try {
+        sendJson(res, 200, oauthRelay.disconnect(key));
+      } catch (discErr) {
+        sendJson(res, discErr.status || 500, { error: discErr.message || String(discErr) });
+      }
+    });
+    return;
+  }
+
+  sendJson(res, 405, { error: 'method_not_allowed', Allow: 'DELETE, POST, GET' });
 }
 
 // Probe one remote gateway: GET <url>/api/status (public). Reachable = the
@@ -1246,7 +1338,12 @@ function testConnection(conn) {
   const target = parseRemoteTarget(conn.url);
   const mod = target.protocol === 'https:' ? https : http;
   const headers = { Host: target.host };
-  if (conn.token) headers['X-Hermes-Session-Token'] = conn.token;
+  if (conn.oauth && conn.oauth.accessToken) {
+    if (oauthRelay.bearer) oauthRelay.bearer(conn.id).catch(() => {});
+    headers['Authorization'] = `Bearer ${conn.oauth.accessToken}`;
+  } else if (conn.token) {
+    headers['X-Hermes-Session-Token'] = conn.token;
+  }
   if (Array.isArray(conn.headers)) {
     for (const h of conn.headers) {
       if (h && h.name) headers[h.name] = String(h.value ?? '');

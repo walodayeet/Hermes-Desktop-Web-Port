@@ -910,8 +910,56 @@ export function installWebBridge(): void {
       version: null,
       error: 'unsupported-in-web',
     }),
-    oauthLoginConnectionConfig: async () => ({ ok: false, baseUrl: '', connected: false }),
-    oauthLogoutConnectionConfig: async () => ({ ok: false, connected: false }),
+    // RFC 8252 native-PKCE login relayed by the proxy (the browser can't
+    // listen on a loopback port). begin() kicks off the flow server-side and
+    // returns the gateway authorize URL; we open it in a new tab so the user
+    // can complete sign-in. The proxy finishes the token exchange on the
+    // loopback listener and stores the tokens — the renderer gets
+    // connected:false immediately (the gateway-settings UI refreshes status
+    // once the flow completes; connected:true here is the already-complete
+    // edge case). A gateway without native_pkce → { ok:false, error:
+    // 'native_pkce_unavailable' } (falls back to token mode).
+    oauthLoginConnectionConfig: async (url: string) => {
+      const baseUrl = String(url || '').trim()
+      if (!baseUrl) return { ok: false, baseUrl: '', connected: false }
+      try {
+        // URL goes in the PATH (encodeURIComponent keeps it one segment;
+        // the relay resolves it via findByUrl). The legacy gateway-settings
+        // UI operates on URL, not connection id.
+        const result = await fetchJson<{ ok: boolean; authorizeUrl?: string; baseUrl?: string; connected?: boolean; error?: string }>(
+          `${CONNECTIONS_DOOR}/${encodeURIComponent(baseUrl)}/oauth/begin`,
+          { method: 'POST', body: JSON.stringify({}) },
+        )
+        if (!result.ok || !result.authorizeUrl) {
+          return {
+            ok: false,
+            baseUrl,
+            connected: false,
+            error: result.error === 'native_pkce_unavailable' ? 'native_pkce_unavailable' : undefined,
+          }
+        }
+        // Open the gateway's authorize URL so the user can sign in; the
+        // proxy relays the loopback exchange asynchronously.
+        window.open(result.authorizeUrl, '_blank', 'noopener')
+        return { ok: true, baseUrl, connected: false }
+      } catch {
+        return { ok: false, baseUrl, connected: false }
+      }
+    },
+    // Disconnect: clear stored oauth tokens for the connection matching the
+    // URL (the relay resolves it via findByUrl).
+    oauthLogoutConnectionConfig: async (url?: string) => {
+      const baseUrl = String(url || '').trim()
+      try {
+        const result = await fetchJson<{ ok: boolean }>(
+          `${CONNECTIONS_DOOR}/${encodeURIComponent(baseUrl)}/oauth/disconnect`,
+          { method: 'POST', body: JSON.stringify({}) },
+        )
+        return { ok: Boolean(result && result.ok), connected: false }
+      } catch {
+        return { ok: false, connected: false }
+      }
+    },
 
     // --- v2 multi-connection registry: proxied CRUD over the local door.
     // The renderer never receives token bytes (the door redacts); the proxy

@@ -16,6 +16,13 @@
 //         "url": "http://host:port",         // remote/cloud only
 //         "authMode": "token",
 //         "token": "<plaintext>",            // secret — 0600 file
+//         "oauth": {                         // secret — RFC 8252 native tokens
+//           "accessToken": "…",              //   (only when authMode=oauth)
+//           "refreshToken": "…",
+//           "expiresAt": 1780000000,
+//           "provider": "…",
+//           "userId": "…"
+//         },
 //         "headers": { "Name": "value" },    // extra gateway headers (secrets)
 //         "installId": "…"                   // last-known /api/status install_id
 //       }
@@ -33,7 +40,8 @@
 //
 // Secrets never leave this module's redacted views: the renderer-facing
 // registry carries `tokenSet`/`tokenPreview` (last 4 chars) + `headerNames`
-// only. The file is written mode 0600.
+// only; oauth connections keep `tokenSet` false and expose just
+// `oauthConnected`/`oauthExpiresAt`. The file is written mode 0600.
 
 const fs = require('fs');
 const os = require('os');
@@ -116,7 +124,11 @@ function tokenPreview(token) {
 // ── CRUD (server-side operations; the proxy door maps HTTP verbs onto these) ──
 
 // Renderer-facing view: token bytes → tokenSet/tokenPreview; headers → names.
+// OAuth tokens are never exposed — only `oauthConnected` + `oauthExpiresAt`
+// (+ provider) so the UI can show sign-in state. `tokenSet` stays false for
+// oauth-only connections.
 function toPublicConnection(c) {
+  const oauth = c && c.oauth && c.oauth.accessToken ? c.oauth : null;
   const tokenSet = Boolean(c.token);
   const out = {
     id: c.id,
@@ -124,7 +136,13 @@ function toPublicConnection(c) {
     label: c.label,
     tokenSet,
     tokenPreview: tokenSet ? tokenPreview(c.token) : null,
+    oauthConnected: Boolean(oauth),
   };
+  if (oauth) {
+    out.oauthExpiresAt =
+      Number.isFinite(oauth.expiresAt) && oauth.expiresAt > 0 ? oauth.expiresAt : null;
+    if (oauth.provider) out.oauthProvider = oauth.provider;
+  }
   if (c.url) out.url = c.url;
   if (c.authMode) out.authMode = c.authMode;
   if (c.org) out.org = c.org;
@@ -151,6 +169,7 @@ function localConnection() {
     label: 'Local',
     tokenSet: false,
     tokenPreview: null,
+    oauthConnected: false,
   };
 }
 
@@ -298,10 +317,42 @@ function get(id) {
   return loadRegistry().connections.find((c) => c.id === id) || null;
 }
 
+// Resolve a stored connection whose normalized url matches (the legacy
+// gateway-settings UI operates on URL, not connection id).
+function findByUrl(url) {
+  const norm = normalizeUrl(url);
+  if (!norm) return null;
+  return loadRegistry().connections.find((c) => normalizeUrl(c.url) === norm) || null;
+}
+
+// Store (or clear, with null) the oauth token set on a connection resolved by
+// id or URL. Tokens live only in the 0600 file — never in any public view.
+function setOauth(connKey, oauth) {
+  const registry = loadRegistry();
+  let entry = registry.connections.find((c) => c.id === connKey);
+  if (!entry) {
+    const norm = normalizeUrl(connKey);
+    if (norm) entry = registry.connections.find((c) => normalizeUrl(c.url) === norm);
+  }
+  if (!entry) {
+    const err = new Error(`no connection for oauth key "${connKey}"`);
+    err.status = 404;
+    throw err;
+  }
+  if (oauth === null || oauth === undefined) {
+    delete entry.oauth;
+  } else {
+    entry.oauth = oauth;
+  }
+  saveRegistry(registry);
+  return entry;
+}
+
 module.exports = {
   CONNECTIONS_FILE,
   LOCAL_CONNECTION_ID,
   duplicateIndex,
+  findByUrl,
   get,
   list,
   loadRegistry,
@@ -309,6 +360,7 @@ module.exports = {
   normalizeUrl,
   remove,
   save,
+  setOauth,
   setPrimary,
   toPublicConnection,
   toPublicRegistry,
