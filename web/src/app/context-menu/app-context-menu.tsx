@@ -609,7 +609,14 @@ export function AppContextMenu() {
       const element = event.target instanceof Element ? event.target : null
 
       // Surfaces with their own Radix context menu keep the whole gesture.
-      if (element?.closest('[data-slot="context-menu-trigger"]')) {
+      // Web port: also match the statusbar — its footer carries its own
+      // data-slot="statusbar" (Radix asChild keeps the child's data-slot over
+      // the trigger's), so the upstream closest() check missed it and this
+      // handler stole the gesture, killing the statusbar's Radix ContextMenu.
+      if (
+        element?.closest('[data-slot="context-menu-trigger"]') ||
+        element?.closest('[data-slot="statusbar"]')
+      ) {
         return
       }
 
@@ -633,6 +640,9 @@ export function AppContextMenu() {
         return
       }
 
+      event.preventDefault()
+      event.preventDefault()
+      event.preventDefault()
       event.stopPropagation()
       openDomContextMenu(event.clientX, event.clientY, target)
     }

@@ -1129,6 +1129,54 @@ patchFile(
 }`,
 )
 
+// --- app/context-menu/app-context-menu.tsx: web-port right-click -----------
+// Web port (browser) fixes for the synced upstream handler. The upstream
+// handler deliberately never calls preventDefault (Electron's main-process
+// context-menu event swallows the native menu for it); a browser tab has no
+// main process, so without preventDefault the BROWSER's native menu overlays
+// the app menu. Separately, the statusbar footer carries its own
+// data-slot="statusbar", which a Radix asChild/mergeProps keeps OVER the
+// trigger's data-slot="context-menu-trigger", so the closest() check misses
+// it and this handler steals the gesture from the statusbar's Radix ContextMenu.
+patchFile(
+  'app/context-menu/app-context-menu.tsx',
+  'Web port (browser): suppress the native context menu + let Radix own the statusbar',
+  `    const onContextMenu = (event: MouseEvent) => {
+      const element = event.target instanceof Element ? event.target : null
+
+      // Surfaces with their own Radix context menu keep the whole gesture.
+      if (element?.closest('[data-slot="context-menu-trigger"]')) {
+        return
+      }`,
+  `    const onContextMenu = (event: MouseEvent) => {
+      const element = event.target instanceof Element ? event.target : null
+
+      // Surfaces with their own Radix context menu keep the whole gesture.
+      // Web port: also match the statusbar — its footer carries its own
+      // data-slot="statusbar" (Radix asChild keeps the child's data-slot over
+      // the trigger's), so the upstream closest() check missed it and this
+      // handler stole the gesture, killing the statusbar's Radix ContextMenu.
+      if (
+        element?.closest('[data-slot="context-menu-trigger"]') ||
+        element?.closest('[data-slot="statusbar"]')
+      ) {
+        return
+      }`,
+)
+// Web port: suppress the browser's native menu. Upstream relies on the
+// Electron main-process context-menu event (which only fires for UNPREVENTED
+// gestures, and with no Menu.popup means "no menu"); a browser tab has no main
+// process, so the native menu would render on top of the app menu.
+patchFile(
+  'app/context-menu/app-context-menu.tsx',
+  'Web port (browser): preventDefault before opening the app context menu',
+  `      event.stopPropagation()
+      openDomContextMenu(event.clientX, event.clientY, target)`,
+  `      event.preventDefault()
+      event.stopPropagation()
+      openDomContextMenu(event.clientX, event.clientY, target)`,
+)
+
 if (touched === 0) {
   console.log('no patches applied (all present)')
 } else {
