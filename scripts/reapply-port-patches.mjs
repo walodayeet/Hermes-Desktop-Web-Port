@@ -1134,47 +1134,93 @@ patchFile(
 // handler deliberately never calls preventDefault (Electron's main-process
 // context-menu event swallows the native menu for it); a browser tab has no
 // main process, so without preventDefault the BROWSER's native menu overlays
-// the app menu. Separately, the statusbar footer carries its own
-// data-slot="statusbar", which a Radix asChild/mergeProps keeps OVER the
-// trigger's data-slot="context-menu-trigger", so the closest() check misses
-// it and this handler steals the gesture from the statusbar's Radix ContextMenu.
+// the app menu on EVERY right-click. Separately, the statusbar footer carries
+// its own data-slot="statusbar", which a Radix asChild/mergeProps keeps OVER
+// the trigger's data-slot="context-menu-trigger", so the closest() check
+// missed it and stole the gesture from the statusbar's own ContextMenu.
+//
+// Idempotency: ONE patch replaces the whole handler. The inserted comment
+// `Web port (browser): right-click fixes` IS the marker string, so a second
+// run sees `src.includes(marker)` and skips. Do NOT split into per-site
+// find/replace: a `stopPropagation()`→`openDomContextMenu` anchor survives a
+// bare preventDefault insert and stacks on every re-run.
 patchFile(
   'app/context-menu/app-context-menu.tsx',
-  'Web port (browser): suppress the native context menu + let Radix own the statusbar',
+  'Web port (browser): right-click fixes',
   `    const onContextMenu = (event: MouseEvent) => {
       const element = event.target instanceof Element ? event.target : null
 
       // Surfaces with their own Radix context menu keep the whole gesture.
       if (element?.closest('[data-slot="context-menu-trigger"]')) {
         return
-      }`,
+      }
+
+      // A terminal's canvas has no DOM to resolve; its registered handle
+      // carries the xterm selection and paste path instead.
+      const terminal = terminalMenuHandleFor(element)
+
+      if (terminal) {
+        event.stopPropagation()
+        openTerminalContextMenu(event.clientX, event.clientY, terminal)
+
+        return
+      }
+
+      const target = resolveDomTarget(element)
+      const owned = Boolean(target.linkUrl || target.onImage || target.editable || target.selectionText)
+
+      // The reaction bubble owns bare right-clicks; a link inside it still
+      // opens the link menu.
+      if (!owned && element?.closest(\`[\${CONTEXT_MENU_SKIP_ATTR}]\`)) {
+        return
+      }
+
+      event.stopPropagation()
+      openDomContextMenu(event.clientX, event.clientY, target)
+    }`,
   `    const onContextMenu = (event: MouseEvent) => {
       const element = event.target instanceof Element ? event.target : null
 
       // Surfaces with their own Radix context menu keep the whole gesture.
-      // Web port: also match the statusbar — its footer carries its own
-      // data-slot="statusbar" (Radix asChild keeps the child's data-slot over
-      // the trigger's), so the upstream closest() check missed it and this
-      // handler stole the gesture, killing the statusbar's Radix ContextMenu.
+      // Web port (browser): right-click fixes — also match the statusbar: its
+      // footer carries its own data-slot="statusbar" (Radix asChild keeps the
+      // child's data-slot over the trigger's), so the upstream closest() check
+      // missed it and this handler stole the gesture, killing the statusbar's
+      // Radix ContextMenu.
       if (
         element?.closest('[data-slot="context-menu-trigger"]') ||
         element?.closest('[data-slot="statusbar"]')
       ) {
         return
-      }`,
-)
-// Web port: suppress the browser's native menu. Upstream relies on the
-// Electron main-process context-menu event (which only fires for UNPREVENTED
-// gestures, and with no Menu.popup means "no menu"); a browser tab has no main
-// process, so the native menu would render on top of the app menu.
-patchFile(
-  'app/context-menu/app-context-menu.tsx',
-  'Web port (browser): preventDefault before opening the app context menu',
-  `      event.stopPropagation()
-      openDomContextMenu(event.clientX, event.clientY, target)`,
-  `      event.preventDefault()
+      }
+
+      // A terminal's canvas has no DOM to resolve; its registered handle
+      // carries the xterm selection and paste path instead.
+      const terminal = terminalMenuHandleFor(element)
+
+      if (terminal) {
+        event.preventDefault()
+        event.stopPropagation()
+        openTerminalContextMenu(event.clientX, event.clientY, terminal)
+
+        return
+      }
+
+      const target = resolveDomTarget(element)
+      const owned = Boolean(target.linkUrl || target.onImage || target.editable || target.selectionText)
+
+      // The reaction bubble owns bare right-clicks; a link inside it still
+      // opens the link menu.
+      if (!owned && element?.closest(\`[\${CONTEXT_MENU_SKIP_ATTR}]\`)) {
+        return
+      }
+
+      // preventDefault: a browser tab has no Electron main process to swallow
+      // the native menu — without it the browser's menu overlays ours.
+      event.preventDefault()
       event.stopPropagation()
-      openDomContextMenu(event.clientX, event.clientY, target)`,
+      openDomContextMenu(event.clientX, event.clientY, target)
+    }`,
 )
 
 if (touched === 0) {

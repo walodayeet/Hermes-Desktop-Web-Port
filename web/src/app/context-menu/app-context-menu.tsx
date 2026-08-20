@@ -609,10 +609,11 @@ export function AppContextMenu() {
       const element = event.target instanceof Element ? event.target : null
 
       // Surfaces with their own Radix context menu keep the whole gesture.
-      // Web port: also match the statusbar — its footer carries its own
-      // data-slot="statusbar" (Radix asChild keeps the child's data-slot over
-      // the trigger's), so the upstream closest() check missed it and this
-      // handler stole the gesture, killing the statusbar's Radix ContextMenu.
+      // Web port (browser): right-click fixes — also match the statusbar: its
+      // footer carries its own data-slot="statusbar" (Radix asChild keeps the
+      // child's data-slot over the trigger's), so the upstream closest() check
+      // missed it and this handler stole the gesture, killing the statusbar's
+      // Radix ContextMenu.
       if (
         element?.closest('[data-slot="context-menu-trigger"]') ||
         element?.closest('[data-slot="statusbar"]')
@@ -625,6 +626,7 @@ export function AppContextMenu() {
       const terminal = terminalMenuHandleFor(element)
 
       if (terminal) {
+        event.preventDefault()
         event.stopPropagation()
         openTerminalContextMenu(event.clientX, event.clientY, terminal)
 
@@ -640,8 +642,8 @@ export function AppContextMenu() {
         return
       }
 
-      event.preventDefault()
-      event.preventDefault()
+      // preventDefault: a browser tab has no Electron main process to swallow
+      // the native menu — without it the browser's menu overlays ours.
       event.preventDefault()
       event.stopPropagation()
       openDomContextMenu(event.clientX, event.clientY, target)
