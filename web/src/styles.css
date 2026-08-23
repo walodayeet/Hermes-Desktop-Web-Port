@@ -1751,6 +1751,50 @@ body.guest-pointer-lock :is(webview, iframe) {
   padding-bottom: var(--composer-shell-pad-block-end);
 }
 
+/* Web port (mobile): the sidebar's top nav (Phiên mới / Khả năng / …) is a
+   vertical stack of 8-9 full-width buttons that eats ~40% of the Sheet before
+   the session list — hard to reach a session comfortably. Below the app's
+   768px collapse breakpoint, collapse that stack into a single-row icon rail
+   (labels hidden, icon-only, small) so sessions own the height. */
+@media (max-width: 767px) {
+  [data-nav-rail='true'] {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+  [data-nav-rail='true'] [data-slot='sidebar-menu-button'] {
+    height: 2.25rem;
+    justify-content: center;
+    padding-inline: 0;
+  }
+  [data-nav-rail='true'] [data-slot='sidebar-menu-button'] > span:not([class*='size-']) {
+    display: none;
+  }
+}
+
+/* Web port (mobile): the sidebar's top nav (Phiên mới / Khả năng / …) is a
+   vertical stack of 8-9 full-width buttons that eats ~40% of the Sheet before
+   the session list — hard to reach a session comfortably. Below the app's
+   768px collapse breakpoint, collapse that stack into a single-row icon rail
+   (labels hidden, icon-only, small) so sessions own the height. */
+@media (max-width: 767px) {
+  [data-nav-rail='true'] {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+  [data-nav-rail='true'] [data-slot='sidebar-menu-button'] {
+    height: 2.25rem;
+    justify-content: center;
+    padding-inline: 0;
+  }
+  [data-nav-rail='true'] [data-slot='sidebar-menu-button'] > span:not([class*='size-']) {
+    display: none;
+  }
+}
+
 [data-slot='composer-root'] {
   width: 100%;
   padding-inline: 5px;

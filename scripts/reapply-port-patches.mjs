@@ -1371,6 +1371,46 @@ patchFile(
   )`,
 )
 patchFile(
+  'app/chat/sidebar/index.tsx',
+  'data-nav-rail="true"',
+  `            <SidebarMenu className="gap-px">`,
+  `            <SidebarMenu className="gap-px" data-nav-rail="true">`,
+)
+patchFile(
+  'styles.css',
+  'Web port (mobile): sidebar nav becomes a compact icon rail',
+  `[data-slot='composer-dock'] {
+  width: calc(min(var(--composer-width), calc(100% - 2rem)) + 10px);
+  padding-bottom: var(--composer-shell-pad-block-end);
+}`,
+  `[data-slot='composer-dock'] {
+  width: calc(min(var(--composer-width), calc(100% - 2rem)) + 10px);
+  padding-bottom: var(--composer-shell-pad-block-end);
+}
+
+/* Web port (mobile): the sidebar's top nav (Phiên mới / Khả năng / …) is a
+   vertical stack of 8-9 full-width buttons that eats ~40% of the Sheet before
+   the session list — hard to reach a session comfortably. Below the app's
+   768px collapse breakpoint, collapse that stack into a single-row icon rail
+   (labels hidden, icon-only, small) so sessions own the height. */
+@media (max-width: 767px) {
+  [data-nav-rail='true'] {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+  [data-nav-rail='true'] [data-slot='sidebar-menu-button'] {
+    height: 2.25rem;
+    justify-content: center;
+    padding-inline: 0;
+  }
+  [data-nav-rail='true'] [data-slot='sidebar-menu-button'] > span:not([class*='size-']) {
+    display: none;
+  }
+}`,
+)
+patchFile(
   'store/session-states.ts',
   'Web port (mobile): single-surface',
   '  const tiles = $sessionTiles.get()\n\n  // Opening a session in a tab/tile is "reading" it',
