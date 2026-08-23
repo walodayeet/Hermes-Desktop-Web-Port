@@ -19,19 +19,19 @@ import driverCss from 'driver.js/dist/driver.css?raw'
 // Web port: driver.js's exports map hides the IIFE path; a bare import
 // forces externalization (bare specifier in the browser → white page). Use
 // the hoisted repo-root file directly so Vite bundles the raw string.
-import driverIifeRaw from '../../../../../node_modules/driver.js/dist/driver.js.iife.js?raw'
+import driverIife from '../../../../../node_modules/driver.js/dist/driver.js.iife.js?raw'
 
 import { collectTourTargets } from '@/lib/tour/collect-targets'
 import { runTourEngine, type TourAction, type TourResult } from '@/lib/tour/engine'
 
-import { activeTourRunner } from './preview-tour-runner'
+import { activePreviewScriptRunner } from './preview-script-runner'
 
 /** Build the idempotent inject-and-run script for one tour action. */
 function buildTourScript(action: TourAction): string {
   return `(function () {
   var w = window;
   if (!w.__hermesTourEngine) {
-    ${driverIifeRaw}
+    ${driverIife}
     w.__hermesTourHolder = {};
     w.__hermesTourCollect = (${collectTourTargets.toString()});
     w.__hermesTourEngine = (${runTourEngine.toString()});
@@ -54,7 +54,7 @@ function buildTourScript(action: TourAction): string {
 
 /** Run one tour action in the ACTIVE preview tab's page. */
 export async function runPreviewTour(action: TourAction): Promise<TourResult> {
-  const run = activeTourRunner()
+  const run = activePreviewScriptRunner()
 
   if (!run) {
     return { error: 'No live page is open in the preview pane — open one first.', success: false }

@@ -21,6 +21,8 @@
  * fenced out until a later page confirms the value we wrote.
  */
 
+import { atom } from 'nanostores'
+
 import { setSessionPinnedRemote } from '@/hermes'
 import { onConnectionScopeChange } from '@/lib/connection-scoped'
 import { $pinnedSessionIds, pinSession, unpinSession } from '@/store/layout'
@@ -65,10 +67,34 @@ const pending = new Set<string>()
 // with a cooldown so a row that never comes back can't fence itself forever.
 const unconfirmed = new Map<string, { at: number; value: boolean }>()
 
+/**
+ * The ids `unconfirmed` currently fences, for readers outside this module.
+ *
+ * The sidebar's Pinned section falls back to the server `pinned` flag for rows
+ * the local set doesn't know about, and that fallback needs the same fence the
+ * pull pass uses: a row whose flag our own in-flight write contradicts is not
+ * news, it's the past. Without it an unpin re-lists the session under Pinned
+ * until the next page lands.
+ *
+ * Re-published only when the key set actually changes, so a sidebar memo keyed
+ * on it survives an ordinary session refresh.
+ */
+export const $unconfirmedPinWrites = atom<ReadonlySet<string>>(new Set())
+
 // How long an unconfirmed write outranks a page that contradicts it. Long
 // enough to cover a list request issued just before the PATCH (those are the
 // slow ones), short enough that a genuine server-side change still wins.
 const WRITE_GUARD_MS = 10_000
+
+function publishUnconfirmed(): void {
+  const published = $unconfirmedPinWrites.get()
+
+  if (published.size === unconfirmed.size && [...unconfirmed.keys()].every(id => published.has(id))) {
+    return
+  }
+
+  $unconfirmedPinWrites.set(new Set(unconfirmed.keys()))
+}
 
 function profileFor(pinId: string): null | string | undefined {
   return $sessions.get().find(row => sessionMatchesStoredId(row, pinId))?.profile
@@ -122,6 +148,7 @@ function writePin(id: string, pinned: boolean, profile?: null | string): Promise
       // A failed write leaves the server on the old value, so the guard would
       // be fencing out the truth. Drop it and let the page win.
       unconfirmed.delete(id)
+      publishUnconfirmed()
       throw err
     }
   )
@@ -222,6 +249,9 @@ function reconcile(): void {
     reconcileInner()
   } finally {
     reconciling = false
+    // One publish per top-level pass: writePin adds guards and pullRemotePins
+    // retires them, and re-entrant calls above returned without touching either.
+    publishUnconfirmed()
   }
 }
 
@@ -280,6 +310,15 @@ function reconcileInner(): void {
 
     pending.delete(id)
     mirrored.add(id)
+
+    // Web port (mobile): never re-assert a pin the server already reports
+    // unpinned — a stale boot / another device would flip it back and the
+    // pin resurrects hours later or after switching devices. The pull pass
+    // below drops the stale local copy instead.
+    if (row.pinned === false) {
+      continue
+    }
+
     void writePin(id, true, row.profile).catch(() => {
       // Let a later reconcile retry the mirror.
       mirrored.delete(id)
@@ -316,4 +355,7 @@ export function resetSessionPinMirror(): void {
   mirrored.clear()
   pending.clear()
   unconfirmed.clear()
+  publishUnconfirmed()
+  deselected.clear()
+  saveDeselected()
 }

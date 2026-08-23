@@ -775,7 +775,7 @@ export function installWebBridge(): void {
       setIgnoreMouse: () => {},
       moveBy: () => {},
       setBounds: () => {},
-      setVibrancy: async () => ({ ok: false }),
+      setFrost: async () => ({ ok: false }),
       setSession: () => {},
       onGoto: () => () => {},
       onChanged: () => () => {},

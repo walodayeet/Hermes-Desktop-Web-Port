@@ -427,6 +427,10 @@ export interface ModelOptionProvider {
 }
 
 export interface ModelCapabilities {
+  /** False when the route rejects a reasoning disable ("mandatory" in the
+   *  provider catalog), so the Thinking toggle must not be offered. Absent
+   *  when the catalog doesn't say. */
+  can_disable_reasoning?: boolean
   fast: boolean
   reasoning: boolean
 }
@@ -634,6 +638,9 @@ export interface SessionResumeResponse {
     /** Retained failed turn: the error the terminal frame carried (the frame
      *  itself may have been lost to a disconnect). */
     error?: string
+    /** Structured {layer, code, retryable} descriptor for the retained failed
+     *  turn (see agent/error_surface.py). Omitted by older gateways. */
+    error_surface?: unknown
     recoverable?: boolean
     status?: string
     streaming?: boolean

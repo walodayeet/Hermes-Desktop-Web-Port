@@ -381,6 +381,21 @@ async function reconnectSecondary(entry: Secondary): Promise<void> {
   try {
     await openSecondary(entry)
     entry.reconnectAttempt = 0
+    // The re-dialed backend may have respawned and re-minted runtime ids —
+    // busy flags recorded from THIS socket's pre-drop events would then never
+    // receive their terminal busy:false, leaving the session's running arc
+    // armed forever (#53902/#73082 stale-flag half). Scoped: only runtimes
+    // whose events arrived on this connection are reconciled; live work on
+    // other sockets is untouched, and a genuinely live turn here re-asserts
+    // busy on its next event. Lazy import: a static edge here closes a module
+    // cycle (session-states → … → gateway) that leaves nanostores atoms
+    // undefined at init for whichever module loads second. Best-effort catch:
+    // under partial vi.mock('@/hermes') harnesses the transitive graph can
+    // fail to load — a skipped reconcile there must not surface as an
+    // unhandled rejection (the real graph always loads in production).
+    void import('@/store/session-states')
+      .then(({ reconcileBusyStatesOnReconnect }) => reconcileBusyStatesOnReconnect(entry.scope))
+      .catch(() => undefined)
   } catch (error) {
     // The registry no longer knows this connection (removed while we were
     // backing off), or Electron's deletion guard reports the profile itself
@@ -573,7 +588,9 @@ async function gatewayForProfile(
 export async function requestGatewayForProfile<T>(
   profile: string,
   method: string,
-  params: Record<string, unknown> = {}
+  params: Record<string, unknown> = {},
+  timeoutMs?: number,
+  signal?: AbortSignal
 ): Promise<T> {
   const route = await gatewayForProfile(profile, true)
 
@@ -584,7 +601,12 @@ export async function requestGatewayForProfile<T>(
 
     const routedParams = route.scopeProfile ? { ...params, profile: route.key } : params
 
-    return await route.gateway.request<T>(method, routedParams)
+    // Same arity contract as the ambient path in session-request-router: only
+    // pass the deadline args through when the caller set them, so a plain
+    // profile-routed RPC keeps its two-argument call shape.
+    return await (timeoutMs === undefined && signal === undefined
+      ? route.gateway.request<T>(method, routedParams)
+      : route.gateway.request<T>(method, routedParams, timeoutMs, signal))
   } finally {
     route.release()
   }

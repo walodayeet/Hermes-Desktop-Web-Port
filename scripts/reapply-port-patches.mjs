@@ -457,9 +457,10 @@ patchFile(
   'Web port (mobile): hide dead right-sidebar toggle',
   `  const rightSidebarTool: TitlebarTool = {
     actionId: 'view.toggleRightSidebar',
+    badge: panesFlipped ? unreadBadge : undefined,
     icon: <TitlebarIcon name="layout-sidebar-right" />,
     id: 'right-sidebar',
-    label: rightEdge.open ? t.titlebar.hideRightSidebar : t.titlebar.showRightSidebar,
+    label: \`\${rightLabel}\${panesFlipped ? unreadHint : ''}\`,
     onSelect: () => {
       triggerHaptic('tap')
       rightEdge.toggle()
@@ -467,13 +468,14 @@ patchFile(
   }`,
   `  const rightSidebarTool: TitlebarTool = {
     actionId: 'view.toggleRightSidebar',
+    badge: panesFlipped ? unreadBadge : undefined,
     icon: <TitlebarIcon name="layout-sidebar-right" />,
     id: 'right-sidebar',
     // Web port (mobile): the FILES pane is collapsible and leaves the grid
     // under 768px, so this toggle has nothing to open on a phone — hide it
     // there (desktop keeps it).
     className: 'hidden md:inline-flex',
-    label: rightEdge.open ? t.titlebar.hideRightSidebar : t.titlebar.showRightSidebar,
+    label: \`\${rightLabel}\${panesFlipped ? unreadHint : ''}\`,
     onSelect: () => {
       triggerHaptic('tap')
       rightEdge.toggle()
@@ -626,11 +628,11 @@ patchFile(
 patchFile(
   'app/chat/right-rail/preview-tour.ts',
   'Web port: driver.js IIFE via relative path (exports map bypass)',
-  `import driverIifeRaw from 'driver.js/dist/driver.js.iife.js?raw'`,
+  `import driverIife from 'driver.js/dist/driver.js.iife.js?raw'`,
   `// Web port: driver.js's exports map hides the IIFE path; a bare import
 // forces externalization (bare specifier in the browser → white page). Use
 // the hoisted repo-root file directly so Vite bundles the raw string.
-import driverIifeRaw from '../../../../../node_modules/driver.js/dist/driver.js.iife.js?raw'`,
+import driverIife from '../../../../../node_modules/driver.js/dist/driver.js.iife.js?raw'`,
 )
 
 // --- app/chat/right-rail/preview-tour.ts: resolve driver.js CSS via path -----
@@ -1114,19 +1116,62 @@ patchFile(
 
 patchFile(
   'store/session-pin-sync.ts',
-  'unconfirmed.clear()',
+  'deselected.clear()',
   `export function resetSessionPinMirror(): void {
   mirrored.clear()
   pending.clear()
   unconfirmed.clear()
+  publishUnconfirmed()
 }`,
   `export function resetSessionPinMirror(): void {
   mirrored.clear()
   pending.clear()
   unconfirmed.clear()
+  publishUnconfirmed()
   deselected.clear()
   saveDeselected()
 }`,
+)
+
+// --- store/session-pin-sync.ts: never resurrect a server-unpinned id --------
+// A stale device (or a just-resynced local set) re-asserts pinned=true for
+// every local pin at boot — writePin(id, true) regardless of what the server
+// now says. Another device's unpin (server pinned=false) then gets flipped
+// back, and the pin resurrects "hours later / after switching devices".
+// Guard: when the resolved row already reports pinned=false, skip the replay
+// and let the pull pass below drop the stale local pin instead.
+patchFile(
+  'store/session-pin-sync.ts',
+  'Web port (mobile): never re-assert a server-unpinned pin',
+  `  for (const id of [...pending]) {
+    const row = $sessions.get().find(entry => sessionMatchesStoredId(entry, id))
+
+    if (!row) {
+      continue
+    }
+
+    pending.delete(id)
+    mirrored.add(id)
+    void writePin(id, true, row.profile).catch(() => {`,
+  `  for (const id of [...pending]) {
+    const row = $sessions.get().find(entry => sessionMatchesStoredId(entry, id))
+
+    if (!row) {
+      continue
+    }
+
+    pending.delete(id)
+    mirrored.add(id)
+
+    // Web port (mobile): never re-assert a pin the server already reports
+    // unpinned — a stale boot / another device would flip it back and the
+    // pin resurrects hours later or after switching devices. The pull pass
+    // below drops the stale local copy instead.
+    if (row.pinned === false) {
+      continue
+    }
+
+    void writePin(id, true, row.profile).catch(() => {`,
 )
 
 // --- app/context-menu/app-context-menu.tsx: web-port right-click -----------
@@ -1147,19 +1192,7 @@ patchFile(
 patchFile(
   'app/context-menu/app-context-menu.tsx',
   'Web port (browser): right-click fixes',
-  `    const onContextMenu = (event: MouseEvent) => {
-      const element = event.target instanceof Element ? event.target : null
-
-      // Surfaces with their own Radix context menu keep the whole gesture.
-      if (element?.closest('[data-slot="context-menu-trigger"]')) {
-        return
-      }
-
-      // A terminal's canvas has no DOM to resolve; its registered handle
-      // carries the xterm selection and paste path instead.
-      const terminal = terminalMenuHandleFor(element)
-
-      if (terminal) {
+  `      if (terminal) {
         event.stopPropagation()
         openTerminalContextMenu(event.clientX, event.clientY, terminal)
 
@@ -1178,27 +1211,11 @@ patchFile(
       event.stopPropagation()
       openDomContextMenu(event.clientX, event.clientY, target)
     }`,
-  `    const onContextMenu = (event: MouseEvent) => {
-      const element = event.target instanceof Element ? event.target : null
-
-      // Surfaces with their own Radix context menu keep the whole gesture.
-      // Web port (browser): right-click fixes — also match the statusbar: its
-      // footer carries its own data-slot="statusbar" (Radix asChild keeps the
-      // child's data-slot over the trigger's), so the upstream closest() check
-      // missed it and this handler stole the gesture, killing the statusbar's
-      // Radix ContextMenu.
-      if (
-        element?.closest('[data-slot="context-menu-trigger"]') ||
-        element?.closest('[data-slot="statusbar"]')
-      ) {
-        return
-      }
-
-      // A terminal's canvas has no DOM to resolve; its registered handle
-      // carries the xterm selection and paste path instead.
-      const terminal = terminalMenuHandleFor(element)
-
-      if (terminal) {
+  `      if (terminal) {
+        // Web port (browser): right-click fixes — the upstream handler never
+        // calls preventDefault (Electron's main-process context-menu event
+        // swallows the native menu). A browser tab has no main process, so
+        // without it the browser's native menu overlays ours.
         event.preventDefault()
         event.stopPropagation()
         openTerminalContextMenu(event.clientX, event.clientY, terminal)
@@ -1215,8 +1232,6 @@ patchFile(
         return
       }
 
-      // preventDefault: a browser tab has no Electron main process to swallow
-      // the native menu — without it the browser's menu overlays ours.
       event.preventDefault()
       event.stopPropagation()
       openDomContextMenu(event.clientX, event.clientY, target)

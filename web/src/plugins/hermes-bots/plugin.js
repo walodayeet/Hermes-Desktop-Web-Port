@@ -62,7 +62,7 @@ import {
   useQuery,
   useValue
 } from '@hermes/plugin-sdk'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const { McpTab, ToolsetConfigPanel } = sdk
@@ -120,13 +120,17 @@ function setActivityToasts(enabled) {
 }
 
 /** Detect new inbound activity from a fresh roster: last_active moved past
- *  the watermark for a bot whose chat isn't on screen -> unread + toast. */
+ *  the watermark for a bot whose chat isn't on screen -> unread + toast.
+ *  Watermarks follow botActivitySession (canonical Bot Chat included) —
+ *  last_session alone never sees the hidden Bot Chat, so DMs delivered
+ *  there would neither badge nor toast. */
 function trackInboundActivity(roster) {
   const seeding = !watermarksSeeded
   watermarksSeeded = true
 
   for (const bot of roster) {
-    const ts = bot.last_session?.last_active || 0
+    const activity = botActivitySession(bot)
+    const ts = activity?.last_active || 0
     const prev = rosterWatermarks.get(bot.name) || 0
     rosterWatermarks.set(bot.name, Math.max(prev, ts))
 
@@ -153,7 +157,7 @@ function trackInboundActivity(roster) {
     if ($activityToasts.get()) {
       const meta = $botMeta.get()[bot.name]
       const label = displayName(bot, meta)
-      const preview = (bot.last_session?.preview || '').trim()
+      const preview = (activity?.preview || '').trim()
       const inbound = /^Message from/i.test(preview)
 
       host.notify({
@@ -191,20 +195,31 @@ const $selectedBot = atom('default')
  *  the socket happened to be homed on. */
 const $focusedBotProfile = host.state.focusedSessionProfile || host.state.profile
 
-/** Optional secondary navigation inside the Bots pane. Primary row clicks still
- * open the bot's canonical chat; this state opens its stored-session browser. */
-const $botSessionsWorkspace = atom(null)
-const $botSelectedSessions = atom({})
-const $sessionsGatewayGeneration = atom(0)
+/** Profile that owns the chat currently on screen. Bot Mode opens another
+ *  profile's session without moving the gateway socket, so mention filtering
+ *  and sender identity must follow focus rather than host.state.profile. */
+function focusedMentionProfile() {
+  return String($focusedBotProfile.get?.() || '').trim() || 'default'
+}
+
+/** Optional secondary navigation inside the Bots pane (group-chat rooms). */
 
 /** Group-chat rooms: { [group]: { log: [{from:{kind,name},text,at}], watermarks:{[member]:idx}, epoch, running } }.
  *  Log + watermarks persist via plugin storage; epoch/running are runtime-only. */
 const $groupChats = atom({})
-/** Group whose room view is open in the Bots pane (secondary navigation,
- *  same pattern as $botSessionsWorkspace). */
+/** Group whose room view is open in the Bots pane (secondary navigation
+ *  inside the pane; a normal row click returns to the roster). */
 const $groupChatWorkspace = atom(null)
 /** Groups whose latest room activity mentions @user — the needs-you badge. */
 const $groupNeedsYou = atom({})
+// Pending prompts (clarify questions AND command approvals) raised inside
+// hidden group-member sessions, keyed `${group}::${memberKey}` (#90694).
+// Members run in invisible plumbing sessions, so a member's blocking prompt
+// used to park server-side with no surface to answer it — the user saw
+// "is thinking…" until the prompt timeout. The turn poll mirrors each
+// member's `pending_clarify` / `pending_approval` resume fields in here;
+// the room renders answer cards from it.
+const $groupClarify = atom({})
 
 // ── group activity feed ─────────────────────────────────────────────────────
 // Runtime-only, bounded per-room record of turn events that feeds the
@@ -292,9 +307,818 @@ function groupActivityTone(kind) {
   return 'text-(--ui-text-tertiary)'
 }
 
+const GROUP_CHAT_SYNC_META_KEY = 'hermes-bots-groups'
+// Gateway ui_meta is capped after Python JSON serialization. Keep a healthy
+// margin below that limit because Python escapes Unicode while JS does not.
+const GROUP_CHAT_SYNC_MAX_BYTES = 48000
+const GROUP_CHAT_SYNC_MESSAGES = 16
+const GROUP_CHAT_SYNC_TEXT_CHARS = 1200
+const GROUP_CHAT_SYNC_IMAGE_CHARS = 24000
+let groupChatSyncTimer = null
+// Fan-out scheduler state, keyed by gateway connectionId ('' = active/local).
+// Every connected gateway carries the full projection so a room survives any
+// single gateway being removed and surfaces on every remote backend.
+const groupChatSyncPendingByConnection = new Map()
+const groupChatSyncInFlightConnections = new Set()
+const groupChatSyncRetryTimers = new Map()
+const groupChatSyncRetryCounts = new Map()
+let groupChatSyncDisposed = false
+
+/** Conservative byte count for the gateway's ensure_ascii JSON encoding.
+ *  Python also inserts separator spaces, so reserve one extra byte per JS
+ *  structural separator on top of escaped Unicode code-point widths. */
+function groupChatGatewayJsonSize(value) {
+  const json = JSON.stringify(value)
+  let bytes = 0
+
+  for (const character of json) {
+    const codePoint = character.codePointAt(0)
+
+    if (codePoint <= 0x7f) {
+      bytes += 1
+      if (character === ',' || character === ':') {
+        bytes += 1
+      }
+    } else {
+      bytes += codePoint <= 0xffff ? 6 : 12
+    }
+  }
+
+  return bytes
+}
+
+/** Durable room identity for the sync projection. Rooms minted on current
+ *  builds carry an immutable roomId; the projection keys rooms by
+ *  `id:<roomId>` so rename is a display-name edit, not a distributed
+ *  delete+create, and disband tombstones follow the room itself. Legacy
+ *  rooms (no roomId) fall back to `name:<name>` keys with the older
+ *  revision-gated tombstone semantics. */
+function groupChatRoomKey(name, room) {
+  return typeof room?.roomId === 'string' && room.roomId
+    ? `id:${room.roomId}`
+    : `name:${String(name)}`
+}
+
+/** Lift any historical projection shape (v1 wall-clock, v2 name-keyed) to
+ *  the v3 room-key shape so one merge path serves mixed-version fleets. */
+function normalizeGroupChatSyncSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') {
+    return { version: 3, rooms: {}, deleted: {} }
+  }
+  if (Number(snapshot.version || 0) >= 3) {
+    return {
+      version: 3,
+      updatedAt: Number(snapshot.updatedAt || 0),
+      rooms: snapshot.rooms && typeof snapshot.rooms === 'object' ? snapshot.rooms : {},
+      deleted: snapshot.deleted && typeof snapshot.deleted === 'object' ? snapshot.deleted : {}
+    }
+  }
+  const rooms = {}
+  for (const [name, room] of Object.entries(snapshot.rooms || {})) {
+    if (!room || !Array.isArray(room.log)) {
+      continue
+    }
+    rooms[`name:${name}`] = { ...room, name }
+  }
+  const deleted = {}
+  for (const [name, at] of Object.entries(snapshot.deleted || {})) {
+    // v1 tombstones carried wall-clock ms, not gateway revisions — they must
+    // not outrank real revisions (same rule groupChatSyncDeletedRevision
+    // applied before v3).
+    deleted[`name:${name}`] = Number(snapshot.version || 0) >= 2 ? Math.max(0, Number(at || 0)) : 0
+  }
+  return { version: 3, updatedAt: Number(snapshot.updatedAt || 0), rooms, deleted }
+}
+
+/** Compact, display-oriented copy of Desktop's room log for gateway clients.
+ *  The live orchestration state stays in plugin storage; this bounded mirror
+ *  rides the default profile's ui_meta so mobile can show the same messages.
+ *  Newest rooms/messages win when the profile metadata size cap is reached. */
+function groupChatSyncSnapshot(all = $groupChats.get(), deleted = {}) {
+  const ranked = Object.entries(all || {})
+    // Empty runtime tombstones are used to stop an in-flight room after
+    // disband. They are not real rooms and must never reappear on mobile.
+    .filter(([, room]) => room && Array.isArray(room.log) && room.log.length > 0)
+    .sort(([, left], [, right]) => {
+      const leftAt = Number(left.log[left.log.length - 1]?.at || 0)
+      const rightAt = Number(right.log[right.log.length - 1]?.at || 0)
+      return rightAt - leftAt
+    })
+  const rooms = {}
+  const boundedDeleted = Object.fromEntries(
+    Object.entries(deleted)
+      .sort(([, left], [, right]) => Number(right || 0) - Number(left || 0))
+      .slice(0, 64)
+  )
+  const envelope = {
+    version: 3,
+    updatedAt: Date.now(),
+    rooms,
+    ...(Object.keys(boundedDeleted).length ? { deleted: boundedDeleted } : {})
+  }
+
+  for (const [name, room] of ranked) {
+    const log = room.log.slice(-GROUP_CHAT_SYNC_MESSAGES).map(entry => ({
+      ...(entry?.id ? { id: String(entry.id).slice(0, 160) } : {}),
+      from: {
+        kind: entry?.from?.kind === 'member' ? 'member' : 'user',
+        name: String(entry?.from?.name || (entry?.from?.kind === 'member' ? 'Bot' : 'You')).slice(0, 128),
+        ...(entry?.from?.source ? { source: String(entry.from.source).slice(0, 128) } : {})
+      },
+      text: String(entry?.text || '').slice(0, GROUP_CHAT_SYNC_TEXT_CHARS),
+      at: Number(entry?.at || 0),
+      ...(entry?.thread ? { thread: String(entry.thread).slice(0, 128) } : {})
+    }))
+    const compact = {
+      name: String(name).slice(0, 64),
+      ...(typeof room?.roomId === 'string' && room.roomId ? { roomId: String(room.roomId).slice(0, 128) } : {}),
+      log,
+      revision: Math.max(0, Number(room?.syncRevision ?? room?.revision ?? 0)),
+      members: (Array.isArray(room.members) ? room.members : []).slice(0, GROUP_CHAT_MAX_MEMBERS).map(member => ({
+        name: String(member?.name || '').slice(0, 128),
+        ...(member?.handle ? { handle: String(member.handle).slice(0, 128) } : {}),
+        ...(member?.connectionId ? { connectionId: String(member.connectionId).slice(0, 128) } : {}),
+        ...(member?.connectionKind ? { connectionKind: String(member.connectionKind).slice(0, 64) } : {}),
+        ...(member?.connectionLabel ? { connectionLabel: String(member.connectionLabel).slice(0, 128) } : {}),
+        ...(member?.sourceScoped ? { sourceScoped: true } : {})
+      })),
+      ...(typeof room?.image === 'string' && room.image.length <= GROUP_CHAT_SYNC_IMAGE_CHARS
+        ? { image: room.image }
+        : {})
+    }
+
+    const key = groupChatRoomKey(name, room)
+    rooms[key] = compact
+    while (compact.log.length > 1 && groupChatGatewayJsonSize(envelope) > GROUP_CHAT_SYNC_MAX_BYTES) {
+      compact.log.shift()
+    }
+    if (compact.image && groupChatGatewayJsonSize(envelope) > GROUP_CHAT_SYNC_MAX_BYTES) {
+      delete compact.image
+    }
+    if (groupChatGatewayJsonSize(envelope) > GROUP_CHAT_SYNC_MAX_BYTES) {
+      delete rooms[key]
+    }
+  }
+
+  return envelope
+}
+
+function groupChatSyncEntryKey(entry) {
+  if (entry?.id) {
+    return `id:${String(entry.id)}`
+  }
+  return JSON.stringify([
+    Number(entry?.at || 0),
+    String(entry?.from?.kind || ''),
+    String(entry?.from?.name || ''),
+    String(entry?.from?.source || ''),
+    // Threadless entries (pre-thread rooms, older Desktop builds) get
+    // SYNTHETIC `legacy-N` ids from assignLegacyThreads. Those ids are
+    // position-derived — not stable across a gateway round-trip (the
+    // projection copy may be threadless or numbered differently). Collapse
+    // the whole synthetic family to one bucket, or the merge duplicates
+    // every id-less entry — shifting watermarks and manufacturing phantom
+    // member turns that re-submit into busy sessions.
+    String(entry?.thread || 'legacy').replace(/^legacy-\d+$/, 'legacy'),
+    String(entry?.text || '')
+  ])
+}
+
+function groupChatSyncMemberKey(member) {
+  return JSON.stringify([
+    String(member?.source || ''),
+    String(member?.connectionId || ''),
+    String(member?.connectionLabel || ''),
+    String(member?.handle || ''),
+    String(member?.name || '')
+  ])
+}
+
+function groupChatSyncDeletedRevision(source, value) {
+  return Number(source?.version || 0) >= 2 ? Math.max(0, Number(value || 0)) : 0
+}
+
+/** Merge two bounded projections without treating an absent room/message as
+ *  deletion. Rooms are identified by durable room keys (id:<roomId> when the
+ *  room carries one), so a rename is a same-key field update — never a
+ *  distributed delete+create — and a disband tombstone follows the room
+ *  itself. Gateway revisions order identity/membership/picture and
+ *  tombstones; stable message ids make concurrent log union idempotent.
+ *  `changedRooms`/`deletedRooms` accept display names or room keys. */
+function mergeGroupChatSyncSnapshots(
+  remote,
+  local,
+  { changedRooms = [], deletedRooms = [], writeRevision = 0 } = {}
+) {
+  const remoteNorm = normalizeGroupChatSyncSnapshot(remote)
+  const localNorm = normalizeGroupChatSyncSnapshot(local)
+  const keysFor = (label, norm) => {
+    const keys = new Set()
+    for (const [key, room] of Object.entries(norm.rooms || {})) {
+      if (key === label || String(room?.name || '') === label || key === `name:${label}`) {
+        keys.add(key)
+      }
+    }
+    if (String(label).startsWith('id:') || String(label).startsWith('name:')) {
+      keys.add(label)
+    } else if (!keys.size) {
+      keys.add(`name:${label}`)
+    }
+    return keys
+  }
+  const changed = new Set()
+  for (const label of changedRooms) {
+    for (const key of keysFor(label, localNorm)) {
+      changed.add(key)
+    }
+  }
+  const deleted = {}
+  for (const source of [remoteNorm, localNorm]) {
+    for (const [key, at] of Object.entries(source.deleted || {})) {
+      deleted[key] = Math.max(Number(deleted[key] || 0), Math.max(0, Number(at || 0)))
+    }
+  }
+  for (const label of deletedRooms) {
+    for (const key of new Set([...keysFor(label, remoteNorm), ...keysFor(label, localNorm)])) {
+      // Rename passes changedRooms:[newName] + deletedRooms:[oldName]. For an
+      // id-keyed room both labels resolve to the SAME durable key (the remote
+      // copy still carries the old display name), and id tombstones are
+      // final — so tombstoning here would kill the room being renamed. A key
+      // that is being written this cycle is a rename target, not a disband.
+      if (changed.has(key)) {
+        continue
+      }
+      deleted[key] = Math.max(Number(deleted[key] || 0), Number(writeRevision || 0))
+    }
+  }
+
+  const rooms = {}
+  const roomKeys = new Set([...Object.keys(remoteNorm.rooms || {}), ...Object.keys(localNorm.rooms || {})])
+  for (const key of roomKeys) {
+    const remoteRoom = remoteNorm.rooms?.[key]
+    const localRoom = localNorm.rooms?.[key]
+    if ((!remoteRoom || !Array.isArray(remoteRoom.log)) && (!localRoom || !Array.isArray(localRoom.log))) {
+      continue
+    }
+    const remoteRevision = Math.max(0, Number(remoteRoom?.revision || 0))
+    const localRevision = changed.has(key)
+      ? Math.max(0, Number(writeRevision || 0))
+      : Math.max(0, Number(localRoom?.revision || 0))
+    const entries = new Map()
+    for (const entry of [...(remoteRoom?.log || []), ...(localRoom?.log || [])]) {
+      entries.set(groupChatSyncEntryKey(entry), entry)
+    }
+
+    // Identity fields (display name, membership, picture) follow the higher
+    // revision; a tie unions members and prefers the local writer's fields.
+    let identity
+    let members
+    let image
+    if (localRevision > remoteRevision) {
+      identity = localRoom
+      members = [...(localRoom?.members || [])]
+      image = localRoom?.image
+    } else if (remoteRevision > localRevision) {
+      identity = remoteRoom
+      members = [...(remoteRoom?.members || [])]
+      image = remoteRoom?.image
+    } else {
+      identity = localRoom || remoteRoom
+      const byId = new Map()
+      for (const member of [...(remoteRoom?.members || []), ...(localRoom?.members || [])]) {
+        byId.set(groupChatSyncMemberKey(member), member)
+      }
+      members = [...byId.values()]
+      image = Object.prototype.hasOwnProperty.call(localRoom || {}, 'image') ? localRoom.image : remoteRoom?.image
+    }
+    rooms[key] = {
+      ...(identity?.name ? { name: identity.name } : {}),
+      ...(identity?.roomId || (key.startsWith('id:') ? key.slice(3) : '')
+        ? { roomId: identity?.roomId || key.slice(3) }
+        : {}),
+      log: [...entries.values()].sort((left, right) => {
+        const byTime = Number(left?.at || 0) - Number(right?.at || 0)
+        return byTime || groupChatSyncEntryKey(left).localeCompare(groupChatSyncEntryKey(right))
+      }),
+      members,
+      revision: Math.max(remoteRevision, localRevision),
+      ...(typeof image === 'string' && image ? { image } : {})
+    }
+  }
+
+  for (const [key, deletedRevision] of Object.entries(deleted)) {
+    if (key.startsWith('id:')) {
+      // Tombstones for id-keyed rooms are FINAL: the roomId is minted once
+      // and never reused (same-name recreation mints a fresh id), so a
+      // resurrect-by-revision race is structurally impossible. Keep the
+      // tombstone even when a lagging gateway's copy carries a higher
+      // revision — that copy is the resurrection this exists to prevent.
+      delete rooms[key]
+    } else if (Number(deletedRevision || 0) >= Number(rooms[key]?.revision || 0)) {
+      delete rooms[key]
+    } else {
+      delete deleted[key]
+    }
+  }
+
+  return groupChatSyncEnvelope(rooms, deleted)
+}
+
+/** Assemble + size-bound a v3 envelope from already-compacted rooms. */
+function groupChatSyncEnvelope(rooms, deleted = {}) {
+  const boundedDeleted = Object.fromEntries(
+    Object.entries(deleted)
+      .sort(([, left], [, right]) => Number(right || 0) - Number(left || 0))
+      .slice(0, 64)
+  )
+  const envelope = {
+    version: 3,
+    updatedAt: Date.now(),
+    rooms,
+    ...(Object.keys(boundedDeleted).length ? { deleted: boundedDeleted } : {})
+  }
+  const ranked = Object.entries(rooms).sort(([, left], [, right]) => {
+    const leftAt = Number(left?.log?.[left.log.length - 1]?.at || 0)
+    const rightAt = Number(right?.log?.[right.log.length - 1]?.at || 0)
+    return leftAt - rightAt
+  })
+  for (const [key, room] of ranked) {
+    while ((room.log?.length || 0) > 1 && groupChatGatewayJsonSize(envelope) > GROUP_CHAT_SYNC_MAX_BYTES) {
+      room.log.shift()
+    }
+    if (room.image && groupChatGatewayJsonSize(envelope) > GROUP_CHAT_SYNC_MAX_BYTES) {
+      delete room.image
+    }
+    if (groupChatGatewayJsonSize(envelope) > GROUP_CHAT_SYNC_MAX_BYTES) {
+      delete rooms[key]
+    }
+  }
+  return envelope
+}
+
+/** Merge the gateway's bounded display projection into Desktop's richer room
+ *  state without discarding local session/watermark/runtime fields. Missing
+ *  remote rooms/messages are not deletions; only explicit tombstones remove a
+ *  room, and a genuinely newer local message wins over a stale tombstone. */
+function mergeRemoteGroupChatSnapshotIntoRooms(
+  remote,
+  current = $groupChats.get(),
+  { preserveRooms = [], deletedRooms = [] } = {}
+) {
+  const remoteNorm = normalizeGroupChatSyncSnapshot(remote)
+  const rooms = { ...(current || {}) }
+  const preserved = new Set(preserveRooms)
+  const locallyDeleted = new Set(deletedRooms)
+
+  // Local rooms indexed by durable identity so an id-keyed projection room
+  // finds its local twin even when the display name changed remotely.
+  const localByRoomId = new Map()
+  for (const [name, room] of Object.entries(rooms)) {
+    if (typeof room?.roomId === 'string' && room.roomId) {
+      localByRoomId.set(room.roomId, name)
+    }
+  }
+
+  for (const [key, projected] of Object.entries(remoteNorm.rooms || {})) {
+    if (!projected || !Array.isArray(projected.log)) {
+      continue
+    }
+    const projectedRoomId = projected.roomId || (key.startsWith('id:') ? key.slice(3) : null)
+    const localName = projectedRoomId && localByRoomId.has(projectedRoomId)
+      ? localByRoomId.get(projectedRoomId)
+      : (projected.name && rooms[projected.name] ? projected.name : null)
+    const displayName = String(projected.name || localName || (key.startsWith('name:') ? key.slice(5) : key))
+    if (locallyDeleted.has(displayName) || (localName && locallyDeleted.has(localName))) {
+      // Mid-rename guard: the remote copy may still be under the OLD display
+      // name while the local record was already re-keyed (same roomId, new
+      // name). That old name sits in deletedRooms, but the local record is
+      // the rename in flight — deleting it here would kill the renamed room.
+      if (localName && localName !== displayName && !locallyDeleted.has(localName)) {
+        continue
+      }
+      delete rooms[displayName]
+      if (localName) {
+        delete rooms[localName]
+      }
+      continue
+    }
+    const existing = (localName ? rooms[localName] : rooms[displayName]) || {}
+    const remoteRevision = Math.max(0, Number(projected.revision || 0))
+    const localRevision = Math.max(0, Number(existing.syncRevision || 0))
+    const entries = new Map(
+      (Array.isArray(existing.log) ? existing.log : []).map(entry => [groupChatSyncEntryKey(entry), entry])
+    )
+    const members = new Map(
+      (Array.isArray(existing.members) ? existing.members : []).map(member => [groupChatSyncMemberKey(member), member])
+    )
+
+    for (const entry of projected.log) {
+      const entryKey = groupChatSyncEntryKey(entry)
+      // The projection is COMPACT (truncated text, no images). When the same
+      // entry exists locally, the local rich copy is authoritative — merging
+      // the compact twin over it would strip attachments and retrigger
+      // watermark deltas for members that already saw it (phantom rounds).
+      if (!entries.has(entryKey)) {
+        entries.set(entryKey, entry)
+      }
+    }
+    const isPreserved = preserved.has(displayName) || (localName && preserved.has(localName))
+    if (!isPreserved) {
+      if (remoteRevision > localRevision) {
+        members.clear()
+      }
+      for (const member of Array.isArray(projected.members) ? projected.members : []) {
+        members.set(groupChatSyncMemberKey(member), { ...member, remoteSource: true })
+      }
+    }
+
+    const log = assignLegacyThreads(
+      [...entries.values()].sort((left, right) => {
+        const byTime = Number(left?.at || 0) - Number(right?.at || 0)
+        return byTime || groupChatSyncEntryKey(left).localeCompare(groupChatSyncEntryKey(right))
+      })
+    )
+    const bounded = trimGroupChatLog(log, existing.watermarks || {})
+
+    // A remote rename with a higher revision moves the local record to the
+    // new display name; local views keyed by the old name follow on the
+    // next repaint (roster derives from $groupChats keys).
+    const targetName = !isPreserved && remoteRevision > localRevision ? displayName : (localName || displayName)
+    if (localName && targetName !== localName) {
+      delete rooms[localName]
+    }
+
+    rooms[targetName] = {
+      ...existing,
+      log: bounded.log,
+      watermarks: bounded.watermarks,
+      sessions: existing.sessions && typeof existing.sessions === 'object' ? existing.sessions : {},
+      stranded: existing.stranded && typeof existing.stranded === 'object' ? existing.stranded : {},
+      members: [...members.values()],
+      ...(projectedRoomId || existing.roomId ? { roomId: existing.roomId || projectedRoomId } : {}),
+      image: isPreserved
+        ? existing.image || null
+        : remoteRevision >= localRevision && Object.prototype.hasOwnProperty.call(projected, 'image')
+          ? projected.image || null
+          : existing.image || null,
+      syncRevision: isPreserved ? localRevision : Math.max(remoteRevision, localRevision),
+      epoch: Number(existing.epoch || 0),
+      running: Boolean(existing.running)
+    }
+  }
+
+  for (const [key, deletedAt] of Object.entries(remoteNorm.deleted || {})) {
+    const deletedRoomId = key.startsWith('id:') ? key.slice(3) : null
+    const targetName = deletedRoomId && localByRoomId.has(deletedRoomId)
+      ? localByRoomId.get(deletedRoomId)
+      : key.startsWith('name:') ? key.slice(5) : null
+    if (!targetName || preserved.has(targetName)) {
+      continue
+    }
+    if (deletedRoomId) {
+      // Id tombstones are final — the id is never reused, so there is no
+      // legitimate higher-revision recreation to protect.
+      delete rooms[targetName]
+    } else {
+      const deletedRevision = Math.max(0, Number(deletedAt || 0))
+      if (deletedRevision >= Number(rooms[targetName]?.syncRevision || 0)) {
+        delete rooms[targetName]
+      }
+    }
+  }
+  for (const name of locallyDeleted) {
+    delete rooms[name]
+  }
+
+  return rooms
+}
+
+function durableGroupChatRooms(all = $groupChats.get()) {
+  const durable = {}
+
+  for (const [name, room] of Object.entries(all || {})) {
+    if (!room || !Array.isArray(room.log)) {
+      continue
+    }
+    // Disband tombstones are runtime-only coordination state (they hold the
+    // epoch bump for an in-flight drive). Persisting one would resurrect the
+    // room as an empty record on the next load AND keep its name "taken" for
+    // same-name recreates. Mirrors updateGroupChat's inline durable map.
+    if (room.tombstone) {
+      continue
+    }
+    durable[name] = {
+      log: room.log,
+      watermarks: room.watermarks || {},
+      sessions: room.sessions || {},
+      stranded: room.stranded || {},
+      members: Array.isArray(room.members) ? room.members : [],
+      // Immutable room identity: without this, a room merged in via the
+      // remote-sync path (the only caller of this function) loses its
+      // roomId on the next cold hydrate and falls back to legacy
+      // name-keyed identity — same field updateGroupChat's inline map
+      // already carries.
+      roomId: typeof room.roomId === 'string' && room.roomId ? room.roomId : null,
+      image: room.image || null,
+      syncRevision: Math.max(0, Number(room.syncRevision || 0))
+    }
+  }
+
+  return durable
+}
+
+function persistGroupChatRooms(all = $groupChats.get()) {
+  try {
+    return Promise.resolve(pluginCtx?.storage?.set?.('group-chats', durableGroupChatRooms(all))).catch(() => undefined)
+  } catch {
+    return Promise.resolve()
+  }
+}
+
+function groupChatSyncConnectionId() {
+  return String(host.state.connectionId?.get?.() || host.activeConnectionId?.() || '')
+}
+
+/** Route a sync job back to the gateway that was active when it was queued.
+ *  A foreground switch during debounce must not write the old snapshot into
+ *  the newly active gateway. */
+async function groupChatSyncRequest(job, method, params) {
+  if (job.connectionId && typeof host.profileRoutes === 'function' && typeof host.requestProfile === 'function') {
+    const routes = await host.profileRoutes()
+    const route = (Array.isArray(routes) ? routes : []).find(candidate => {
+      const profile = String(candidate?.targetProfile || candidate?.profile || '')
+      return String(candidate?.connectionId || '') === job.connectionId && profile === 'default'
+    })
+
+    if (route) {
+      return host.requestProfile(route, method, params)
+    }
+  }
+
+  const currentConnectionId = groupChatSyncConnectionId()
+  if (job.connectionId && currentConnectionId && job.connectionId !== currentConnectionId) {
+    throw new Error('Group chat gateway changed before sync')
+  }
+  return host.request(method, params)
+}
+
+async function groupChatRemoteSnapshot(job) {
+  const result = await groupChatSyncRequest(job, 'profiles.list', { include_sessions: false })
+  const profile = (Array.isArray(result?.profiles) ? result.profiles : []).find(row => row?.name === 'default')
+  const snapshot = profile?.ui_meta?.[GROUP_CHAT_SYNC_META_KEY]
+  const supportsCas = Boolean(profile && Object.prototype.hasOwnProperty.call(profile, 'ui_meta_revisions'))
+  return {
+    snapshot: snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot) ? snapshot : null,
+    revision: Math.max(0, Number(profile?.ui_meta_revisions?.[GROUP_CHAT_SYNC_META_KEY] || 0)),
+    supportsCas
+  }
+}
+
+/** Pull the shared room projection into this Desktop before it publishes any
+ *  local state. This is the receive half of the client-only sync contract. */
+async function pullGroupChatServerState(connectionId = groupChatSyncConnectionId()) {
+  const { snapshot: remote } = await groupChatRemoteSnapshot({ connectionId })
+
+  if (!remote) {
+    return false
+  }
+  const pending = groupChatSyncPendingByConnection.get(String(connectionId || ''))
+  const merged = mergeRemoteGroupChatSnapshotIntoRooms(remote, $groupChats.get(), {
+    preserveRooms: pending?.changedRooms || [],
+    deletedRooms: pending?.deletedRooms || []
+  })
+  $groupChats.set(merged)
+  await persistGroupChatRooms(merged)
+  return true
+}
+
+function groupChatSyncBackoff(connectionId) {
+  const count = Number(groupChatSyncRetryCounts.get(connectionId) || 0)
+  return Math.min(30000, 1000 * 2 ** Math.min(count, 5))
+}
+
+function mergeGroupChatSyncJobs(existing, incoming) {
+  if (!existing || existing.connectionId !== incoming.connectionId) {
+    return incoming
+  }
+  return {
+    connectionId: incoming.connectionId,
+    allowEmpty: Boolean(existing.allowEmpty || incoming.allowEmpty),
+    changedRooms: [...new Set([...(existing.changedRooms || []), ...(incoming.changedRooms || [])])],
+    deletedRooms: [...new Set([...(existing.deletedRooms || []), ...(incoming.deletedRooms || [])])]
+  }
+}
+
+function groupChatSyncPayloadEqual(left, right) {
+  return (
+    JSON.stringify(left?.rooms || {}) === JSON.stringify(right?.rooms || {}) &&
+    JSON.stringify(left?.deleted || {}) === JSON.stringify(right?.deleted || {})
+  )
+}
+
+/** Every default-profile gateway route this Desktop can currently reach.
+ *  The projection fans out to ALL of them, so any single gateway can die or
+ *  be removed without losing the shared room state, and gateway-only
+ *  clients (Hermes Go, headless backends) see rooms regardless of which
+ *  gateway a Desktop was foregrounding when the room was used. */
+async function groupChatSyncTargetConnections() {
+  const targets = new Set()
+  const active = groupChatSyncConnectionId()
+  targets.add(String(active || ''))
+  if (typeof host.profileRoutes === 'function' && typeof host.requestProfile === 'function') {
+    try {
+      const routes = await host.profileRoutes()
+      for (const route of Array.isArray(routes) ? routes : []) {
+        const profile = String(route?.targetProfile || route?.profile || '')
+        const connectionId = String(route?.connectionId || '')
+        if (profile === 'default' && connectionId) {
+          targets.add(connectionId)
+        }
+      }
+    } catch {
+      // Route inventory unavailable — the active gateway alone still syncs.
+    }
+  }
+  return [...targets]
+}
+
+async function flushGroupChatServerSync(connectionId) {
+  if (connectionId === undefined) {
+    // Drain every connection with pending work.
+    for (const pendingId of [...groupChatSyncPendingByConnection.keys()]) {
+      void flushGroupChatServerSync(pendingId)
+    }
+    return
+  }
+  const id = String(connectionId || '')
+  if (groupChatSyncDisposed || groupChatSyncInFlightConnections.has(id) || !groupChatSyncPendingByConnection.has(id)) {
+    return
+  }
+  const job = groupChatSyncPendingByConnection.get(id)
+  groupChatSyncPendingByConnection.delete(id)
+  groupChatSyncInFlightConnections.add(id)
+
+  try {
+    const remoteState = await groupChatRemoteSnapshot(job)
+    const local = groupChatSyncSnapshot($groupChats.get())
+    const writeRevision = remoteState.revision + 1
+    const snapshot = mergeGroupChatSyncSnapshots(remoteState.snapshot, local, {
+      changedRooms: job.changedRooms,
+      deletedRooms: job.deletedRooms,
+      writeRevision
+    })
+
+    // Reconnect/startup reconciliation often discovers that the gateway
+    // already holds the exact merged projection. Avoid advancing a revision
+    // merely because a view reopened.
+    if (!(job.changedRooms || []).length && !(job.deletedRooms || []).length && groupChatSyncPayloadEqual(snapshot, remoteState.snapshot)) {
+      if (remoteState.snapshot) {
+        const pending = groupChatSyncPendingByConnection.get(id)
+        const mergedRooms = mergeRemoteGroupChatSnapshotIntoRooms(remoteState.snapshot, $groupChats.get(), {
+          preserveRooms: pending?.changedRooms || [],
+          deletedRooms: pending?.deletedRooms || []
+        })
+        $groupChats.set(mergedRooms)
+        await persistGroupChatRooms(mergedRooms)
+      }
+      groupChatSyncRetryCounts.delete(id)
+      return
+    }
+
+    const configureParams = {
+      name: 'default',
+      ui_meta: { [GROUP_CHAT_SYNC_META_KEY]: snapshot }
+    }
+    if (remoteState.supportsCas) {
+      configureParams.ui_meta_expected_revisions = { [GROUP_CHAT_SYNC_META_KEY]: remoteState.revision }
+    }
+    const result = await groupChatSyncRequest(job, 'profiles.configure', configureParams)
+
+    if (result?.applied?.ui_meta !== true) {
+      throw new Error('Gateway rejected group chat ui_meta')
+    }
+    if (
+      remoteState.supportsCas &&
+      Number(result?.applied?.ui_meta_revisions?.[GROUP_CHAT_SYNC_META_KEY] || 0) !== writeRevision
+    ) {
+      throw new Error('Gateway did not advance group chat ui_meta revision')
+    }
+
+    const confirmedState = await groupChatRemoteSnapshot(job)
+    if (remoteState.supportsCas && confirmedState.revision < writeRevision) {
+      throw new Error('Group chat ui_meta revision missing after read-back')
+    }
+    if (confirmedState.snapshot) {
+      const pending = groupChatSyncPendingByConnection.get(id)
+      const mergedRooms = mergeRemoteGroupChatSnapshotIntoRooms(confirmedState.snapshot, $groupChats.get(), {
+        preserveRooms: pending?.changedRooms || [],
+        deletedRooms: pending?.deletedRooms || []
+      })
+      $groupChats.set(mergedRooms)
+      await persistGroupChatRooms(mergedRooms)
+    }
+    groupChatSyncRetryCounts.delete(id)
+  } catch {
+    if (!groupChatSyncDisposed) {
+      const retries = Number(groupChatSyncRetryCounts.get(id) || 0) + 1
+      // A gateway that was REMOVED (not just flaky) has no route anymore and
+      // would otherwise retry forever. Give up after the backoff ladder tops
+      // out; local storage remains authoritative and a future reconnect of
+      // that gateway re-seeds it via the gateway-transition pull/publish.
+      if (retries > 8) {
+        groupChatSyncRetryCounts.delete(id)
+        return
+      }
+      groupChatSyncPendingByConnection.set(id, mergeGroupChatSyncJobs(groupChatSyncPendingByConnection.get(id), job))
+      groupChatSyncRetryCounts.set(id, retries)
+      if (typeof setTimeout === 'function' && !groupChatSyncRetryTimers.has(id)) {
+        groupChatSyncRetryTimers.set(id, setTimeout(() => {
+          groupChatSyncRetryTimers.delete(id)
+          void flushGroupChatServerSync(id)
+        }, groupChatSyncBackoff(id)))
+      }
+    }
+  } finally {
+    groupChatSyncInFlightConnections.delete(id)
+    if (groupChatSyncPendingByConnection.has(id) && !groupChatSyncRetryTimers.has(id) && !groupChatSyncDisposed) {
+      void flushGroupChatServerSync(id)
+    }
+  }
+}
+
+function stopGroupChatServerSync() {
+  groupChatSyncDisposed = true
+  groupChatSyncPendingByConnection.clear()
+  if (groupChatSyncTimer !== null) {
+    clearTimeout(groupChatSyncTimer)
+    groupChatSyncTimer = null
+  }
+  for (const timer of groupChatSyncRetryTimers.values()) {
+    clearTimeout(timer)
+  }
+  groupChatSyncRetryTimers.clear()
+  groupChatSyncRetryCounts.clear()
+}
+
+/** Debounced, pull-merge-write server mirror, fanned out to every reachable
+ *  default-profile gateway. Local storage keeps the complete orchestration
+ *  log; ui_meta is a bounded cross-client projection per gateway, each with
+ *  its own CAS revision stream. */
+function scheduleGroupChatServerSync(
+  all = $groupChats.get(),
+  { allowEmpty = false, changedRooms = [], deletedRooms = [] } = {}
+) {
+  // Browser shells provide timers; source-level VM tests and older embedded
+  // hosts may not. Room persistence must never break the surrounding gateway
+  // lifecycle when the optional mirror cannot be scheduled.
+  if (typeof setTimeout !== 'function') {
+    return
+  }
+  const snapshot = groupChatSyncSnapshot(all)
+  // A newly installed Desktop has no local room cache. Publishing that empty
+  // state on hydrate/reconnect would erase a valid mirror produced elsewhere.
+  // Only an explicit final-room disband is allowed to clear the projection.
+  if (Object.keys(snapshot.rooms).length === 0 && !allowEmpty) {
+    return
+  }
+  if (groupChatSyncTimer !== null) {
+    clearTimeout(groupChatSyncTimer)
+  }
+  // Queue on the ACTIVE gateway synchronously (tests and older hosts have no
+  // async route inventory), then widen to every reachable gateway before the
+  // debounce fires.
+  const activeId = String(groupChatSyncConnectionId() || '')
+  const queueFor = connectionId => {
+    const id = String(connectionId || '')
+    const retryTimer = groupChatSyncRetryTimers.get(id)
+    if (retryTimer !== undefined) {
+      clearTimeout(retryTimer)
+      groupChatSyncRetryTimers.delete(id)
+    }
+    groupChatSyncPendingByConnection.set(id, mergeGroupChatSyncJobs(groupChatSyncPendingByConnection.get(id), {
+      connectionId: id,
+      allowEmpty,
+      changedRooms,
+      deletedRooms
+    }))
+  }
+  queueFor(activeId)
+  groupChatSyncTimer = setTimeout(() => {
+    groupChatSyncTimer = null
+    void groupChatSyncTargetConnections()
+      .then(targets => {
+        for (const target of targets) {
+          if (String(target || '') !== activeId) {
+            queueFor(target)
+          }
+        }
+      })
+      .catch(() => undefined)
+      .then(() => flushGroupChatServerSync())
+  }, 350)
+}
+
 function handleSessionsGatewayTransition() {
-  $sessionsGatewayGeneration.set($sessionsGatewayGeneration.get() + 1)
-  $botSelectedSessions.set({})
   // A gateway swap invalidates any in-flight room drive: bump every room's
   // epoch so running loops bail at their next member boundary.
   const rooms = { ...$groupChats.get() }
@@ -304,15 +1128,35 @@ function handleSessionsGatewayTransition() {
   }
 
   $groupChats.set(rooms)
+  // Pull before re-publishing so a reconnect or source swap never lets this
+  // client's stale cache hide a room written by another Desktop/mobile client.
+  void pullGroupChatServerState()
+    .catch(() => false)
+    .then(() => scheduleGroupChatServerSync($groupChats.get()))
 }
 
 /** Per-bot appearance + display meta, persisted via ctx.storage:
  *  { [botName]: { shape, color, title } } */
 const $botMeta = atom({})
 
+/** Freshness fence for the server-meta overlay: the last moment each bot's
+ *  local meta was written (stamped again once the server write settles).
+ *  mergeServerMeta refuses to overlay a roster snapshot FETCHED BEFORE this
+ *  moment — such a snapshot still carries the pre-write ui_meta, and
+ *  spreading it over local meta resurrects state the user just changed
+ *  (disbanded groups reappearing as empty roster rows, renames reverting,
+ *  unpins undoing). Runtime-only by design: on a fresh window there are no
+ *  in-flight local writes for a stale snapshot to clobber. */
+const botMetaWriteAt = new Map()
+
+function noteBotMetaWrite(name) {
+  botMetaWriteAt.set(name, Date.now())
+}
+
 async function saveBotMeta(name, patch) {
   const prevMeta = $botMeta.get()[name] || {}
   const next = { ...$botMeta.get(), [name]: { ...prevMeta, ...patch } }
+  noteBotMetaWrite(name)
   $botMeta.set(next)
 
   // Local plugin storage: instant, and the fallback for older gateways.
@@ -376,6 +1220,10 @@ async function saveBotMeta(name, patch) {
     } catch {
       /* older/unavailable gateway — the local fallback remains saved */
     }
+    // Re-stamp now that the server write settled: a roster snapshot fetched
+    // while profiles.configure was still in flight predates the new ui_meta
+    // just as surely as one fetched before the local write.
+    noteBotMetaWrite(name)
   }
 
   return { serverPersisted: serverOutcome === 'persisted', serverOutcome }
@@ -428,23 +1276,21 @@ function fallbackSelectionAfterHide(name) {
 
 /** One-time reconciliation: Bot Mode sessions are always hidden, but rooms
  *  and Bot Chats created before this policy (or while the old pref was off)
- *  left visible rows behind. On every plugin load, sweep every session id we
- *  own — canonical chats from bot meta plus each group room's member
- *  sessions — through the core session.set_hidden RPC, then run the
- *  ownership-based sweep for the rows we DON'T know by id. Idempotent (the DB
- *  setter is a no-op on already-hidden rows) and feature-detected: older
- *  gateways lack session.set_hidden and simply keep the rows visible. */
+ *  left visible rows behind. On every plugin load, sweep the session ids we
+ *  own by id (each group room's member sessions) through the core
+ *  session.set_hidden RPC, then run the TITLE-based ownership sweep for
+ *  everything else — canonical Bot Chats are identified by name (the
+ *  registry row titled "Bot Chat"), so the title sweep is what hides them;
+ *  no stored-id pointer is consulted. Idempotent (the DB setter is a no-op
+ *  on already-hidden rows) and feature-detected: older gateways lack
+ *  session.set_hidden and simply keep the rows visible. */
 function hideOwnedBotSessions() {
-  const canonical = Object.values($botMeta.get())
-    .map(m => m && m.chat)
-    .filter(Boolean)
   const rooms = Object.values($groupChats.get())
     .flatMap(room => Object.values(room?.sessions || {}))
     .filter(sid => Boolean(sid) && sid !== true)
-  const ids = [...new Set([...canonical, ...rooms])]
 
   const known = Promise.all(
-    ids.map(sid =>
+    [...new Set(rooms)].map(sid =>
       Promise.resolve(host.request('session.set_hidden', { session_id: sid, hidden: true })).catch(() => undefined)
     )
   )
@@ -664,8 +1510,16 @@ function pullServerAvatars(roster) {
  *  pet icon) are PRESERVED — the server copy never includes them, so a
  *  naive replace would wipe a just-saved image avatar on the next roster
  *  paint. When server bot metadata exists, an omitted chat is authoritative
- *  deletion; local still fills all gaps for older gateways with no metadata. */
-function mergeServerMeta(roster) {
+ *  deletion; local still fills all gaps for older gateways with no metadata.
+ *
+ *  `fetchedAt` (the snapshot's issue time) fences the overlay: a bot whose
+ *  local meta was written AFTER the snapshot was fetched is skipped — that
+ *  snapshot's ui_meta predates the write, and spreading it back over local
+ *  meta resurrects state the user just changed (a disbanded group's
+ *  membership reappearing as an empty roster row, a rename reverting, an
+ *  unpin undoing). The next roster fetch post-dates the write and overlays
+ *  normally, so server truth still gets the last word. */
+function mergeServerMeta(roster, fetchedAt = 0) {
   const local = $botMeta.get()
   let changed = false
   const next = { ...local }
@@ -673,6 +1527,9 @@ function mergeServerMeta(roster) {
   for (const bot of roster) {
     const server = bot.ui_meta?.['hermes-bots']
     if (server && typeof server === 'object') {
+      if (fetchedAt && fetchedAt < (botMetaWriteAt.get(bot.name) || 0)) {
+        continue
+      }
       const mine = next[bot.name] || {}
       const merged = { ...mine, ...server }
 
@@ -681,15 +1538,10 @@ function mergeServerMeta(roster) {
         merged.image = mine.image
       }
 
-      // Server metadata is authoritative for the canonical chat pointer.
-      // Without this deletion sync, ctx.storage resurrects stale sessions
-      // after the server pin is cleared and even after a full app restart.
-      if (
-        Object.prototype.hasOwnProperty.call(mine, 'chat') &&
-        !Object.prototype.hasOwnProperty.call(server, 'chat')
-      ) {
-        delete merged.chat
-      }
+      // Legacy canonical-chat pointers (meta.chat) are dead: identity is the
+      // profile's "Bot Chat" registry row, resolved by name. Drop the key on
+      // sight so old ui_meta can never look meaningful again.
+      delete merged.chat
 
       // Canonical multi-group metadata is authoritative for the compatibility
       // scalar too. A server-side `group: null` is represented by omission,
@@ -2700,34 +3552,22 @@ function PetTab({ image, onImage }) {
  *  Gates every SOUL.md protocol append below. */
 let serverInjectsProtocol = false
 
-/** Pins to resolve precisely on the next roster poll: {profile: chatId}.
- *  The backend answers "what about THIS conversation" per entry
- *  (preferred_session), so a row's preview can describe the same session its
- *  click opens (hermes-agent#88200). Unknown params are ignored by older
- *  gateways, which simply omit the field. */
-function preferredSessionIds(allMeta) {
-  const pins = {}
-  for (const [name, meta] of Object.entries(allMeta || {})) {
-    if (meta?.chat) {
-      pins[name] = meta.chat
-    }
-  }
-  return pins
-}
-
 function useRoster() {
   const activeConnectionId = useValue(host.state.connectionId)
 
   return useQuery({
     queryKey: [...ROSTER_KEY, activeConnectionId],
     queryFn: async () => {
-      // Rich rows (last_session, ui_meta, has_avatar) come from the ACTIVE
-      // gateway's profiles.list — unchanged single-source behavior.
-      const pins = preferredSessionIds($botMeta.get())
-      const local = await host.request(
-        'profiles.list',
-        Object.keys(pins).length ? { preferred_session_ids: pins } : {}
-      )
+      // Stamp the ISSUE time on the snapshot: mergeServerMeta compares it
+      // against each bot's last local meta write, and a fetch issued before
+      // a write can only carry pre-write ui_meta. (Issue time is the
+      // conservative bound — the server answered no earlier than this.)
+      const issuedAt = Date.now()
+      // Rich rows (last_session, canonical_session, ui_meta, has_avatar)
+      // come from the ACTIVE gateway's profiles.list — the canonical Bot
+      // Chat is resolved server-side by NAME (the "Bot Chat" registry row),
+      // so the roster never sends session pointers.
+      const local = await host.request('profiles.list', {})
       // Newer backends inject the teammate-messaging protocol into every
       // session's system prompt (agent.bot_mode_protocol) — SOUL.md must not
       // carry a second copy. Older gateways lack the flag: keep appending.
@@ -2741,13 +3581,13 @@ function useRoster() {
       if (typeof host.agents === 'function') {
         try {
           const union = await host.agents()
-          return mergeMultiSourceRoster(local, union, activeConnectionId, $lastRoster.get())
+          return { ...mergeMultiSourceRoster(local, union, activeConnectionId, $lastRoster.get()), fetchedAt: issuedAt }
         } catch {
           /* older build or roster failure — single-source list stands */
         }
       }
 
-      return local
+      return { ...(local && typeof local === 'object' ? local : {}), fetchedAt: issuedAt }
     },
     refetchInterval: 5000,
     staleTime: 5000,
@@ -2756,6 +3596,52 @@ function useRoster() {
     retry: true,
     retryDelay: attempt => Math.min(15000, 1000 * 2 ** attempt)
   })
+}
+
+/** Synchronous union-roster read for the composer surfaces (autocomplete
+ *  provider + mention middleware). useRoster caches under
+ *  [...ROSTER_KEY, activeConnectionId] — a 3-element key — so a bare
+ *  getQueryData(ROSTER_KEY) exact-match lookup returns undefined forever
+ *  (issue #89303: remote handles absent from @ autocomplete, mentions
+ *  unrouted). Read the live connection's entry first, then fall back to a
+ *  prefix scan keeping the freshest snapshot. Never throws: cold cache or
+ *  legacy queryClient returns null and callers fall back to their own path. */
+function cachedUnionRoster() {
+  if (typeof queryClient === 'undefined' || !queryClient || typeof queryClient.getQueryData !== 'function') {
+    return null
+  }
+
+  try {
+    const connectionId = String(
+      host.state.connectionId?.get?.() || host.activeConnectionId?.() || 'local'
+    )
+    const exact = queryClient.getQueryData([...ROSTER_KEY, connectionId])
+
+    if (Array.isArray(exact?.profiles)) {
+      return exact
+    }
+
+    if (typeof queryClient.getQueriesData === 'function') {
+      let best = null
+
+      // v5 takes a filters object; a legacy v3 queryClient treats the same
+      // object as the key itself and simply matches nothing — harmless.
+      for (const [, data] of queryClient.getQueriesData({ queryKey: ROSTER_KEY })) {
+        if (
+          Array.isArray(data?.profiles) &&
+          (!best || Number(data.fetchedAt || 0) > Number(best.fetchedAt || 0))
+        ) {
+          best = data
+        }
+      }
+
+      return best
+    }
+  } catch {
+    /* cache hiccup — caller falls back (middleware refetches) */
+  }
+
+  return null
 }
 
 /** Merge the union agent roster (host.agents) over the active gateway's
@@ -2932,6 +3818,53 @@ function botHandle(name, bot) {
   return (name || '').trim().toLowerCase() === 'default' ? 'hermes' : name
 }
 
+/** Taggable @-forms derived from a bot's friendly names — the core profile
+ *  display name (`hermes profile rename`) and the Bot Mode title. Free text
+ *  reduces to the mention charset two ways: slugified ("Research Buddy" →
+ *  research-buddy, the form autocomplete inserts) and collapsed
+ *  (researchbuddy). Reserved tokens are dropped so a bot renamed "Hermes"
+ *  can never hijack the primary profile's @hermes alias. */
+function mentionNameForms(value) {
+  const name = String(value || '').trim().toLowerCase()
+
+  if (!name) {
+    return []
+  }
+
+  const slug = name.replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '')
+  const collapsed = name.replace(/[^a-z0-9_-]+/g, '')
+
+  return [...new Set([slug, collapsed])].filter(
+    form => /^[a-z0-9][a-z0-9_-]*$/.test(form) && !['all', 'everyone', 'user', 'default', 'hermes'].includes(form)
+  )
+}
+
+/** Every friendly (renameable) name a roster row carries: the Bot Mode title
+ *  (server-synced via ui_meta, locally stored, or persisted on a durable
+ *  group descriptor) and the core profile display_name — in displayName's
+ *  precedence order. Remote rows never borrow local meta (two `default`s
+ *  must not share a title). */
+function botFriendlyNames(bot) {
+  const localTitle = !bot?.remoteSource && typeof $botMeta !== 'undefined' ? $botMeta.get()?.[bot?.name]?.title : null
+
+  return [bot?.ui_meta?.['hermes-bots']?.title, localTitle, bot?.title, bot?.display_name]
+}
+
+/** The tag autocomplete inserts for a bot: the renamed (friendly) slug when
+ *  the user gave the bot a real name, otherwise the profile @handle. The
+ *  resolvers accept both, so older muscle memory keeps working. */
+function botMentionTag(bot) {
+  for (const friendly of botFriendlyNames(bot)) {
+    const forms = mentionNameForms(friendly)
+
+    if (forms.length) {
+      return forms[0]
+    }
+  }
+
+  return botHandle(bot?.name, bot)
+}
+
 function isActiveRosterBot(bot, active) {
   const activeName = String(active?.name || 'default').trim() || 'default'
   const activeId = String(active?.connectionId || '').trim()
@@ -2968,6 +3901,15 @@ function resolveRosterMentions(text, roster, active = {}) {
 
     if (bot.handle) {
       forms.add(String(bot.handle).toLowerCase())
+    }
+
+    // Renamed bots are taggable by their friendly names too — the core
+    // profile display_name and the Bot Mode title (issue: renaming a bot
+    // didn't change what you @-tag it with).
+    for (const friendly of botFriendlyNames(bot)) {
+      for (const form of mentionNameForms(friendly)) {
+        forms.add(form)
+      }
     }
 
     for (const form of forms) {
@@ -3015,171 +3957,6 @@ function resolveRosterMentions(text, roster, active = {}) {
   }
 
   return mentioned
-}
-
-const REMOTE_DM_TIMEOUT_MS = 180000
-const REMOTE_DM_POLL_MS = 2000
-
-/** The remote bot's canonical Bot Chat: pinned stored-id from its profile's
- *  ui_meta first, then resume-by-title, then create. Mirrors
- *  ensureGroupChatSession so DMs land in the ONE forever-chat instead of
- *  minting a fresh "Bot Chat" per mention. */
-async function ensureRemoteCanonicalChat(route, profile) {
-  let pinned = null
-
-  try {
-    const listed = await host.requestProfile(route, 'profiles.list', {})
-    const owner = listed?.profiles?.find(p => p.name === profile)
-    pinned = owner?.ui_meta?.['hermes-bots']?.chat || null
-  } catch {
-    /* older remote gateway — title lookup below still works */
-  }
-
-  for (const target of [pinned, 'Bot Chat']) {
-    if (!target) {
-      continue
-    }
-
-    try {
-      const res = await host.requestProfile(route, 'session.resume', {
-        session_id: target,
-        profile,
-        omit_messages: true
-      })
-
-      if (res?.session_id) {
-        return { runtime: res.session_id, stored: res.session_key || pinned }
-      }
-    } catch {
-      /* fall through */
-    }
-  }
-
-  const created = await host.requestProfile(route, 'session.create', {
-    profile,
-    title: 'Bot Chat',
-    // Bot Mode sessions are always hidden from the global sidebar.
-    hidden: true
-  })
-
-  return { runtime: created?.session_id || null, stored: created?.stored_session_id || null }
-}
-
-/** Bounded reply poll on the recipient's session — same shape as a group
- *  member turn: wait for a NEW assistant message after `before`, or time out. */
-async function pollRemoteDmReply(route, profile, sessionRef, before) {
-  const deadline = Date.now() + REMOTE_DM_TIMEOUT_MS
-
-  while (Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, REMOTE_DM_POLL_MS))
-
-    let state = null
-
-    try {
-      state = await host.requestProfile(route, 'session.resume', { session_id: sessionRef, profile })
-    } catch {
-      continue
-    }
-
-    const messages = Array.isArray(state?.messages) ? state.messages : []
-    const done = !state?.inflight && !state?.running
-
-    if (messages.length > before && done) {
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const msg = messages[i]
-
-        if (msg?.role === 'assistant') {
-          const text = typeof msg.content === 'string'
-            ? msg.content
-            : Array.isArray(msg.content)
-              ? msg.content.map(p => (typeof p === 'string' ? p : p?.text || '')).join('')
-              : msg?.text || ''
-
-          return String(text).trim() || null
-        }
-      }
-
-      return null
-    }
-  }
-
-  return null
-}
-
-/** Deliver a user mention to bots on OTHER connections: into each bot's
- *  canonical Bot Chat, with the standard sender-attribution prefix (so the
- *  recipient's messaging protocol recognizes an agent-to-agent message), then
- *  relay the reply back as a notification. Sequential and fire-and-forget
- *  from the composer's perspective. */
-async function deliverRemoteRosterMentions(bots, userText, sender) {
-  const text = String(userText || '').trim()
-
-  if (!text || typeof host.requestProfile !== 'function') {
-    return
-  }
-
-  const senderName = String(sender?.name || 'the user').trim()
-  const senderHandle = String(sender?.handle || senderName).trim()
-
-  for (const bot of bots) {
-    const connectionId = String(bot?.connectionId || '').trim()
-    const profile = String(bot?.name || '').trim() || 'default'
-
-    if (!connectionId || connectionId === 'local') {
-      continue
-    }
-
-    const route = { connectionId, mode: 'remote', profile, targetProfile: profile }
-    const label = bot.connectionLabel || connectionId
-
-    try {
-      const { runtime, stored } = await ensureRemoteCanonicalChat(route, profile)
-
-      if (!runtime) {
-        throw new Error('No remote session')
-      }
-
-      // Baseline before our submit, so the poll can spot the NEW reply.
-      let before = 0
-
-      try {
-        const pre = await host.requestProfile(route, 'session.resume', { session_id: stored || runtime, profile })
-        before = Array.isArray(pre?.messages) ? pre.messages.length : pre?.message_count || 0
-      } catch {
-        /* lazy session — zero messages */
-      }
-
-      // The delivery prefix is the recipient's cue that an agent (not its
-      // human) is talking — same contract as the local CLI handoff.
-      await host.requestProfile(route, 'prompt.submit', {
-        session_id: runtime,
-        text: `Message from \u{1F916} ${senderName} (@${senderHandle}): ${text}`
-      })
-      host.notify?.({
-        kind: 'info',
-        title: displayName(bot),
-        message: `Messaged @${botHandle(profile, bot)} on ${label} — will relay the reply here.`
-      })
-
-      const reply = await pollRemoteDmReply(route, profile, stored || runtime, before)
-
-      if (reply) {
-        host.notify?.({
-          kind: 'info',
-          title: `\u{1F916} ${displayName(bot)} (${label})`,
-          message: reply.slice(0, 500)
-        })
-      } else {
-        host.notify?.({
-          kind: 'info',
-          title: displayName(bot),
-          message: `No reply from @${botHandle(profile, bot)} yet — check its Bot Chat on ${label}.`
-        })
-      }
-    } catch (error) {
-      host.notifyError?.(error, `Could not reach ${label}`)
-    }
-  }
 }
 
 /** Source-qualified identity for a roster row — the React list key AND the
@@ -3245,23 +4022,27 @@ function showsHandle(name, meta, bot) {
 }
 
 // ── canonical bot chat ───────────────────────────────────────────────────────
-// Each bot has ONE forever chat, pinned by stored-session id in bot meta
-// (meta.chat — synced server-side via ui_meta, so it follows the profile).
-// Opening a bot ALWAYS lands there: never "most recent session", which
-// drifts whenever the profile is used from the CLI, Sessions mode, or a
-// cronjob. The pin only changes through explicit adoption:
-//   - grandfather: first open of a bot that already has history pins its
-//     current latest session, so continuity starts from the chat in use
-//   - fresh bot: opens a draft; when the first message persists a stored
-//     session, we adopt that id (empty sessions are pruned server-side, so
-//     pre-creating one at enable time is not possible)
-//   - recovery: if the pinned id vanishes from the DB (compaction rewrote
-//     the lineage), re-pin the newest session carrying the canonical title.
+// Each bot has ONE forever chat, identified by NAME, never by pointer: the
+// session titled exactly "Bot Chat" on that bot's profile. The core
+// UNIQUE(title) index makes (profile, "Bot Chat") an exact registry, so every
+// open consults that registry directly — there is nothing to verify, re-pin,
+// grandfather, or recover. Stored-id pins (ui_meta['hermes-bots'].chat) were
+// the previous identity and are REMOVED: every lost-chat incident traced to a
+// dangled or stolen pointer that later guards then welded in. Legacy
+// ui_meta.chat keys are simply ignored.
 
 // In-flight creations, keyed by bot name — double-clicking a row must not
 // mint two canonical chats.
 const canonicalCreations = new Map()
+
+/** Upper bound for per-profile session.list scans (hide sweep, canonical-chat
+ *  adoption, stored-session lookups). */
+const PROFILE_SESSION_LIST_LIMIT = 200
 let botOpenGeneration = 0
+
+/** The one canonical title. (profile, CANONICAL_CHAT_TITLE) IS the bot's
+ *  forever-chat identity — see the header above. */
+const CANONICAL_CHAT_TITLE = 'Bot Chat'
 
 async function openStoredBotChat(name, storedId, summary) {
   if (!storedId || typeof host.openSession !== 'function') {
@@ -3272,21 +4053,70 @@ async function openStoredBotChat(name, storedId, summary) {
     typeof summary?.message_count === 'number' && Number.isFinite(summary.message_count)
   const expectHistory = hasAuthoritativeCount ? summary.message_count > 0 : true
 
+  // A profile backend that just woke up can lose the hydration-timeout race
+  // even though the session is fine (hermes-agent#89617) — clicking Retry
+  // succeeds because the backend is warm by then. retryHydrationTimeoutOnce
+  // asks the SDK layer to retry that same wait internally, BEFORE it arms the
+  // core stranded-session overlay: a plugin-side retry can't do this because
+  // only host.openSession sees the resume-exhausted latch that overlay reads.
   await host.openSession(storedId, {
     profile: name,
     intent: 'main',
     awaitHydration: true,
     expectHistory,
-    keepAllProfilesScope: false
+    // Move the WORKSPACE onto this bot, not just the transcript.
+    //
+    // With the default (true) the bot's chat opened against its own backend
+    // while `$activeGatewayProfile` stayed on whatever profile was active
+    // before — so "New session" from inside any bot was created on that other
+    // backend. Measured: four consecutive new chats started from different
+    // bots all landed in the `ops` profile's state.db. Clicking a bot is a
+    // workspace switch in this product (one bot = one workspace), so the
+    // chrome has to follow.
+    keepAllProfilesScope: false,
+    retryHydrationTimeoutOnce: true
   })
 
   return storedId
 }
 
-/** Create the bot's ONE forever chat: a real session opened with a kickoff
- *  message (the gateway prunes zero-message sessions, so the chat is born
- *  with the bot introducing itself). Pins the stored id in bot meta and
- *  returns it. */
+/** True when a session summary IS the canonical registry row. root_title is
+ *  the durable lineage-root title reported by exact-lookup gateways; plain
+ *  title covers windowed listings. */
+function isCanonicalBotChatHistory(history) {
+  const rootTitle = String(history?.root_title || '').trim()
+  const title = String(history?.title || '').trim()
+  return rootTitle === CANONICAL_CHAT_TITLE || (!rootTitle && title === CANONICAL_CHAT_TITLE)
+}
+
+/** THE identity lookup: the profile's session titled exactly "Bot Chat".
+ *  The core UNIQUE title index guarantees at most ONE such row per profile
+ *  db — Profile → Named Session is an exact registry, so consult it exactly:
+ *  `title` asks the gateway for an indexed WHERE title = ? lookup
+ *  (window-free; a busy profile can push the forever-chat past any recency
+ *  window). include_hidden is required (canonical chats are always hidden). */
+async function findExistingCanonicalChat(name) {
+  try {
+    const res = await host.request('session.list', {
+      profile: name,
+      title: CANONICAL_CHAT_TITLE,
+      limit: PROFILE_SESSION_LIST_LIMIT,
+      include_hidden: true
+    })
+    const rows = res?.sessions ?? []
+    return rows.find(row => isCanonicalBotChatHistory(row)) || null
+  } catch {
+    return null
+  }
+}
+
+/** Create the bot's ONE forever chat: a real session titled "Bot Chat",
+ *  opened with a kickoff message (the gateway prunes zero-message sessions,
+ *  so the chat is born with the bot introducing itself). Adopts the existing
+ *  "Bot Chat" row instead of creating when the profile already has one —
+ *  minting while a "Bot Chat" row exists is always wrong twice over: it
+ *  forks the forever-chat AND the new row can never take the (already held)
+ *  canonical title. */
 function createCanonicalChat(name) {
   const inflight = canonicalCreations.get(name)
 
@@ -3295,9 +4125,21 @@ function createCanonicalChat(name) {
   }
 
   const run = (async () => {
+    const existing = await findExistingCanonicalChat(name)
+
+    if (existing?.id) {
+      if (typeof host.openSession === 'function') {
+        // The exact-lookup gateway reports the compression-lineage tip as
+        // resolved_id; open the tip, the registry row stays the identity.
+        await openStoredBotChat(name, existing.resolved_id || existing.id, existing)
+      }
+
+      return existing.id
+    }
+
     const res = await host.request('session.create', {
       profile: name,
-      title: 'Bot Chat',
+      title: CANONICAL_CHAT_TITLE,
       // Always born hidden from the global sidebar — Bot Mode sessions are
       // plugin-owned. Core applies this via the generic `hidden` flag
       // (deferred as pending_hidden until the row exists); older gateways
@@ -3307,8 +4149,22 @@ function createCanonicalChat(name) {
     const sid = res?.stored_session_id
     const runtime = res?.session_id
 
-    if (sid) {
-      saveBotMeta(name, { chat: sid })
+    // session.create is intentionally lazy: its stored row does not exist until
+    // the first prompt. Mounting `sid` immediately therefore emits a noisy REST
+    // 404 ("Session not found"), and the turn-start auto-titler can win the race
+    // against the deferred `title: 'Bot Chat'` — under name-identity that is an
+    // identity outage: until the row is titled, the registry has no "Bot Chat"
+    // entry, so a second click during the intro turn mints a duplicate.
+    // session.title materializes the row now and records a user-authority title
+    // before either the open or kickoff, closing both the 404 race and the
+    // untitled window. Older gateways may not support the eager write; retain
+    // the kickoff-and-retry fallback below.
+    if (runtime) {
+      try {
+        await host.request('session.title', { session_id: runtime, title: CANONICAL_CHAT_TITLE })
+      } catch {
+        /* compatibility fallback: prompt.submit will persist the lazy row */
+      }
     }
 
     // Mount the session view FIRST, then send the kickoff — submitting into
@@ -3335,8 +4191,8 @@ function createCanonicalChat(name) {
           await host.openSession(sid, { profile: name, intent: 'main', keepAllProfilesScope: false })
         }
       } catch {
-        // The chat already exists. Keep the pin so the next click
-        // opens it instead of making a second Bot Chat.
+        // The chat already exists under the canonical title — the next click
+        // finds it by name instead of making a second Bot Chat.
       }
     }
 
@@ -3348,86 +4204,25 @@ function createCanonicalChat(name) {
   return run
 }
 
-/** Open the bot's ONE forever chat and return the opened id (or the pin).
+/** Open the bot's ONE forever chat and return the opened registry id.
  *
- *  Identity rules (hermes-agent#88200 — the row must open the session its
- *  preview describes):
- *  - grandfather: no pin + existing history adopts the previewed session
- *    (`history`, the roster's last_session for this bot) instead of minting
- *    a new empty chat;
- *  - a live pin is verified through the backend's precise preferred_session
- *    resolver (hidden rows still resolve; compression lineages resolve to
- *    the live tip) — never inferred from a paginated, hidden-excluding
- *    session.list window, which misjudged real hidden pins as gone;
- *  - transient lookup failures keep the pin: try the stored id as-is, and
- *    only a rejected open enters recovery. */
-async function openBotCanonicalChat(name, pinned, history) {
-  if (!pinned) {
-    // Grandfather: adopt the conversation the row already previews.
-    const adoptId = history?.id
-    if (adoptId && typeof host.openSession === 'function') {
-      await openStoredBotChat(name, adoptId, history)
-      saveBotMeta(name, { chat: adoptId })
-      return adoptId
-    }
-    return createCanonicalChat(name)
+ *  The whole resolution is one registry consultation: the profile's session
+ *  titled "Bot Chat" exists → open it (lineage tip); it doesn't → create it.
+ *  No id pointer is read or written anywhere in this path. */
+async function openBotCanonicalChat(name) {
+  const existing = await findExistingCanonicalChat(name)
+
+  if (existing?.id && typeof host.openSession === 'function') {
+    await openStoredBotChat(name, existing.resolved_id || existing.id, existing)
+    return existing.id
   }
 
-  // Precise verification. An older gateway ignores the unknown param and
-  // omits the key — that reads as a lookup failure below, NOT as a missing
-  // session, so legacy backends keep the try-as-is escape hatch.
-  let preferred
-  let lookupFailed = false
-  try {
-    const res = await host.request('profiles.list', {
-      include_sessions: true,
-      preferred_session_ids: { [name]: pinned }
-    })
-    const row = (res?.profiles ?? []).find(p => p.name === name)
-    preferred = row?.preferred_session
-    if (preferred === undefined) {
-      lookupFailed = true
-    }
-  } catch {
-    lookupFailed = true
-  }
-
-  if (lookupFailed) {
-    // Transient gateway state (or an older backend): the pin is innocent
-    // until proven guilty — try it as-is. A rejected open is still ambiguous:
-    // it can be the same reconnect/hydration outage that broke this lookup, so
-    // preserve the forever-chat pin and surface Retry instead of forking it.
-    return openStoredBotChat(name, pinned, history)
-  }
-
-  if (preferred) {
-    try {
-      await openStoredBotChat(name, preferred.resolved_id || preferred.id, preferred)
-      return pinned
-    } catch (error) {
-      // The precise lookup JUST confirmed this session exists, so a failed
-      // open is transient (reconnect, backend restart). Clearing the pin or
-      // minting a replacement here would fork the bot's forever-chat on
-      // every hiccup — report and keep everything as it is.
-      throw error
-    }
-  }
-
-  // Definitively gone (db reset, or the lineage was rewritten past
-  // recovery): re-anchor on the previewed session when there is one.
-  const recoveryId = history?.id
-  if (recoveryId && typeof host.openSession === 'function') {
-    await openStoredBotChat(name, recoveryId, history)
-    saveBotMeta(name, { chat: recoveryId })
-    return recoveryId
-  }
-  saveBotMeta(name, { chat: null })
   return createCanonicalChat(name)
 }
 
-async function prepareBotSource(bot, pinnedChat) {
+async function prepareBotSource(bot) {
   if (!bot.sourceScoped) {
-    return pinnedChat
+    return
   }
 
   if (typeof host.ensureAgent !== 'function') {
@@ -3437,7 +4232,7 @@ async function prepareBotSource(bot, pinnedChat) {
   await host.ensureAgent(bot.connectionId, bot.name)
 
   if (!bot.remoteSource) {
-    return pinnedChat
+    return
   }
 
   const liveId = String(typeof host.activeConnectionId === 'function' ? host.activeConnectionId() || '' : '').trim()
@@ -3447,18 +4242,8 @@ async function prepareBotSource(bot, pinnedChat) {
     throw new Error(`Still on ${liveId || 'this device'}, not ${bot.connectionLabel || targetId}`)
   }
 
-  // Thin rows deliberately omit metadata from the active source. Once their
-  // owner is active, recover that source's canonical-chat pointer so
-  // same-named agents never reuse or overwrite each other's pin.
-  try {
-    const refreshed = await host.request('profiles.list', {})
-    const owner = refreshed?.profiles?.find(profile => profile.name === bot.name)
-
-    return owner?.ui_meta?.['hermes-bots']?.chat || null
-  } catch {
-    // Metadata refresh is best-effort; canonical creation remains the fallback.
-    return null
-  }
+  // The canonical chat is found by NAME on the now-active owner source —
+  // there is no per-source pointer to recover.
 }
 
 function displayName(bot, meta) {
@@ -3589,12 +4374,25 @@ function groupChatNames(metaByName, rooms) {
   const names = new Set(knownGroups(metaByName))
 
   for (const [name, room] of Object.entries(rooms || {})) {
+    if (room?.tombstone) {
+      continue
+    }
+
     if ((Array.isArray(room?.members) && room.members.length) || (Array.isArray(room?.log) && room.log.length)) {
       names.add(name)
     }
   }
 
   return [...names]
+}
+
+/** Names of REAL rooms in the atom — disband tombstones excluded. Feeds the
+ *  create/rename collision sets so a just-disbanded name is immediately
+ *  reusable even while an in-flight drive's tombstone still holds its key. */
+function liveGroupChatNames() {
+  return Object.entries($groupChats.get())
+    .filter(([, room]) => !room?.tombstone)
+    .map(([name]) => name)
 }
 
 /** Millisecond timestamp of a room's newest log entry (0 for a silent room) —
@@ -3634,15 +4432,24 @@ function groupChatMemberBots(group, roster, metaByName) {
  *  source's row may become remote after a connection switch, so retaining it
  *  here is what keeps the same room intact across machines. */
 function durableGroupChatMembers(bots) {
-  return (bots || []).map(bot => ({
-    name: bot.name,
-    handle: bot.handle || bot.name,
-    connectionId: bot.connectionId,
-    connectionKind: bot.connectionKind,
-    connectionLabel: bot.connectionLabel,
-    remoteSource: true,
-    sourceScoped: true
-  }))
+  return (bots || []).map(bot => {
+    // Keep the friendly identity on the stored descriptor: after a
+    // connection switch the live roster row may be gone, and renamed-tag
+    // mentions must still resolve against the persisted member.
+    const title = String(botRosterMeta(bot, $botMeta.get())?.title || bot.ui_meta?.['hermes-bots']?.title || bot.title || '').trim()
+
+    return {
+      name: bot.name,
+      handle: bot.handle || bot.name,
+      ...(title ? { title } : {}),
+      ...(bot.display_name ? { display_name: bot.display_name } : {}),
+      connectionId: bot.connectionId,
+      connectionKind: bot.connectionKind,
+      connectionLabel: bot.connectionLabel,
+      remoteSource: true,
+      sourceScoped: true
+    }
+  })
 }
 
 /** Existing group names, alphabetical — feeds the Manage-groups dialog. */
@@ -3710,6 +4517,15 @@ function parseGroupChatMentions(text, members) {
         ? [title.toLowerCase(), title.toLowerCase().replace(/[\s_-]+/g, ''), title.split(/\s+/)[0].toLowerCase()]
         : [])
     ])
+
+    // Renamed members answer to their friendly names too (profile
+    // display_name and Bot Mode title), in slugged and collapsed forms —
+    // the same tags the roster autocomplete inserts.
+    for (const friendly of botFriendlyNames(member)) {
+      for (const form of mentionNameForms(friendly)) {
+        forms.add(form)
+      }
+    }
 
     for (const form of forms) {
       if (form) {
@@ -3865,7 +4681,7 @@ function trimGroupChatLog(log, watermarks, limit = GROUP_CHAT_HISTORY_LIMIT * 4)
 }
 
 /** Mutate one group's room state through the atom + persist the durable part. */
-function updateGroupChat(group, mutate) {
+function updateGroupChat(group, mutate, { sync = true } = {}) {
   const all = { ...$groupChats.get() }
   const current = all[group] || { log: [], watermarks: {}, epoch: 0, running: false }
   const next = mutate({ ...current, log: [...current.log], watermarks: { ...current.watermarks } })
@@ -3880,6 +4696,14 @@ function updateGroupChat(group, mutate) {
     const durable = {}
 
     for (const [name, room] of Object.entries(all)) {
+      // Disband tombstones are runtime-only coordination state (they hold the
+      // epoch bump for an in-flight drive). Persisting one would resurrect
+      // the room as an empty record on the next load AND keep its name
+      // "taken" for same-name recreates.
+      if (room.tombstone) {
+        continue
+      }
+
       durable[name] = {
         log: room.log,
         watermarks: room.watermarks,
@@ -3891,14 +4715,20 @@ function updateGroupChat(group, mutate) {
         // Source-qualified member descriptors keep the room whole when the
         // active connection changes and today's local members become remote.
         members: Array.isArray(room.members) ? room.members : [],
+        // Immutable room identity: the member-session title for new rooms.
+        roomId: typeof room.roomId === 'string' && room.roomId ? room.roomId : null,
         // Room picture (small data URL, same normalization as bot avatars).
-        image: room.image || null
+        image: room.image || null,
+        syncRevision: Math.max(0, Number(room.syncRevision || 0))
       }
     }
 
     Promise.resolve(pluginCtx?.storage?.set?.('group-chats', durable)).catch(() => undefined)
   } catch {
     /* storage unavailable — room survives for this window only */
+  }
+  if (sync) {
+    scheduleGroupChatServerSync(all, { changedRooms: [group] })
   }
 
   return next
@@ -3908,7 +4738,7 @@ function updateGroupChat(group, mutate) {
  *  membership list (the metadata syncs cross-machine via ui_meta), drop the
  *  room log from the atom + plugin storage, and close the room view if it's
  *  open. Other group memberships and the members' per-group gateway sessions
- *  ("Group: <name>") are intentionally KEPT. */
+ *  ("Group: <roomId>", or legacy "Group: <name>") are intentionally KEPT. */
 async function disbandGroupChat(group, members) {
   // Invalidate any in-flight round-robin FIRST: bump the epoch so a running
   // drive bails at its next member boundary instead of appending to a room
@@ -3918,9 +4748,12 @@ async function disbandGroupChat(group, members) {
 
   delete all[group]
   // Keep a runtime-only tombstone while a drive may still be mid-turn; it
-  // carries no log and is never persisted, so it can't rehydrate.
+  // carries no log and is flagged so persistence and name-dedup skip it —
+  // updateGroupChat writes the WHOLE atom map, so an unflagged tombstone
+  // would be persisted by the next unrelated room write and its name would
+  // count as taken, suffixing a same-name recreate to "<name> 2" forever.
   if (prior.running) {
-    all[group] = { log: [], watermarks: {}, sessions: {}, epoch: (prior.epoch || 0) + 1, running: false }
+    all[group] = { log: [], watermarks: {}, sessions: {}, epoch: (prior.epoch || 0) + 1, running: false, tombstone: true }
   }
 
   $groupChats.set(all)
@@ -3936,6 +4769,7 @@ async function disbandGroupChat(group, members) {
 
   delete needs[group]
   $groupNeedsYou.set(needs)
+  clearGroupClarify(group)
 
   // Persist the room map WITHOUT the disbanded room so it can't come back
   // on the next window load.
@@ -3949,7 +4783,9 @@ async function disbandGroupChat(group, members) {
           watermarks: room.watermarks,
           sessions: room.sessions || {},
           members: Array.isArray(room.members) ? room.members : [],
-          image: room.image || null
+          roomId: typeof room.roomId === 'string' && room.roomId ? room.roomId : null,
+          image: room.image || null,
+          syncRevision: Math.max(0, Number(room.syncRevision || 0))
         }
       }
     }
@@ -3958,6 +4794,7 @@ async function disbandGroupChat(group, members) {
   } catch {
     /* storage unavailable — the atom reset above still empties the room */
   }
+  scheduleGroupChatServerSync($groupChats.get(), { allowEmpty: true, deletedRooms: [group] })
 
   // Remove this membership last. saveBotMeta never throws (local storage +
   // best-effort profiles.configure per member), so a flaky gateway can't
@@ -3969,6 +4806,13 @@ async function disbandGroupChat(group, members) {
 
     const meta = $botMeta.get()[member.name] || {}
     await saveBotMeta(member.name, groupMembershipPatch(meta, group, false))
+  }
+
+  // Converge on server truth: the cached roster still carries the pre-disband
+  // ui_meta (the write-fence in mergeServerMeta keeps it from resurrecting
+  // the membership, but a fresh snapshot is what makes every surface agree).
+  if (typeof queryClient !== 'undefined' && queryClient?.invalidateQueries) {
+    queryClient.invalidateQueries({ queryKey: ROSTER_KEY })
   }
 }
 
@@ -3984,9 +4828,11 @@ function setGroupChatImage(group, image) {
 /** Rename a group chat. The group's NAME is its identity everywhere — the
  *  room-map key, each local member's ui_meta membership list, and derived
  *  state — so a rename re-keys all of them. Member gateway sessions are kept
- *  as-is: stored sids keep resuming, so no history is lost (only a member
- *  whose sid is later lost falls back to a fresh "Group: <new name>" title
- *  lookup). Returns the new name, or null when the target name is taken. */
+ *  as-is: stored sids keep resuming, so no history is lost. The room's
+ *  immutable roomId (the member-session title) is preserved across the
+ *  rename, so even a member whose sid is later lost falls back to the same
+ *  "Group: <roomId>" title lookup instead of a fresh "Group: <new name>".
+ *  Returns the new name, or null when the target name is taken. */
 async function renameGroupChat(oldName, newName, members) {
   const next = String(newName || '').trim().slice(0, 64)
 
@@ -3995,8 +4841,9 @@ async function renameGroupChat(oldName, newName, members) {
   }
 
   // Renames are explicit user intent: reject a collision honestly instead of
-  // silently suffixing like creation does.
-  const taken = new Set(Object.keys($groupChats.get()))
+  // silently suffixing like creation does. Disband tombstones don't hold
+  // their name — the room is gone, only its epoch survives briefly.
+  const taken = new Set(liveGroupChatNames())
 
   for (const meta of Object.values($botMeta.get() || {})) {
     for (const existing of botGroups(meta)) {
@@ -4032,6 +4879,10 @@ async function renameGroupChat(oldName, newName, members) {
     $groupNeedsYou.set(needs)
   }
 
+  // Mirrored clarify cards key by group name; drop the old room's — the
+  // next poll re-mirrors any still-blocking question under the new name.
+  clearGroupClarify(oldName)
+
   // Local memberships: swap the name inside each member's canonical groups
   // list (syncs cross-machine via ui_meta). Remote members' seating lives in
   // the room record we just moved.
@@ -4047,7 +4898,14 @@ async function renameGroupChat(oldName, newName, members) {
   }
 
   // Persist the re-keyed map (updateGroupChat writes the whole durable map).
-  updateGroupChat(next, r => r)
+  updateGroupChat(next, r => r, { sync: false })
+  // A rename is one revisioned state transition: the new identity is updated
+  // and the old identity is tombstoned together, so cold hydration cannot
+  // merge the pre-rename room back into the roster.
+  scheduleGroupChatServerSync($groupChats.get(), {
+    changedRooms: [next],
+    deletedRooms: [oldName]
+  })
 
   // Follow the open views to the new identity.
   if ($groupChatWorkspace.get() === oldName) {
@@ -4059,11 +4917,30 @@ async function renameGroupChat(oldName, newName, members) {
     openGroupChat(next)
   }
 
+  // Same convergence as disband: drop the pre-rename roster snapshot so the
+  // old name can't linger anywhere the fence doesn't cover.
+  if (typeof queryClient !== 'undefined' && queryClient?.invalidateQueries) {
+    queryClient.invalidateQueries({ queryKey: ROSTER_KEY })
+  }
+
   return next
 }
 
+function groupChatEntryId() {
+  if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
+    return globalThis.crypto.randomUUID()
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+}
+
 function appendGroupChatEntry(group, from, text, thread, images) {
-  const entry = { at: Date.now(), from, text: String(text).trim(), thread: thread || 'legacy' }
+  const entry = {
+    id: groupChatEntryId(),
+    at: Date.now(),
+    from,
+    text: String(text).trim(),
+    thread: thread || 'legacy'
+  }
 
   if (Array.isArray(images) && images.length) {
     // [{ name, data }] — data URLs. Persisted with the room log so reloads
@@ -4084,6 +4961,33 @@ function appendGroupChatEntry(group, from, text, thread, images) {
   return entry
 }
 
+/** Fresh room identity for a group. Independent of the editable display
+ *  name: a disbanded-and-recreated group mints a new roomId even when the
+ *  display name is identical, so member sessions never resume by title. */
+function mintGroupRoomId() {
+  return `r${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+}
+
+/** Unique display name for a NEW group. Collisions get a " 2", " 3", …
+ *  suffix; the BASE is truncated (never the joined string), so a 64-char
+ *  base keeps its suffix instead of colliding with the original. */
+function uniqueGroupChatName(base, taken) {
+  if (!taken.has(base)) {
+    return base
+  }
+
+  for (let n = 2; n < 100; n++) {
+    const suffix = ` ${n}`
+    const candidate = base.slice(0, 64 - suffix.length) + suffix
+
+    if (!taken.has(candidate)) {
+      return candidate
+    }
+  }
+
+  throw new Error('No free name for the group.')
+}
+
 /** Ensure the member's per-group session exists and return a LIVE runtime
  *  session id for it. Gateway-native: session.create mints the session
  *  (lazy until its first message), session.resume by stored id — or by
@@ -4091,8 +4995,11 @@ function appendGroupChatEntry(group, from, text, thread, images) {
  *  it after restarts. Cross-connection members route to their OWN source
  *  via requestForBot; the window's gateway never switches. */
 async function ensureGroupChatSession(group, member) {
-  const title = `Group: ${group}`
   const room = $groupChats.get()[group] || {}
+  // New rooms title member sessions by their immutable roomId so a
+  // same-name recreate never resumes the old room's sessions by title;
+  // legacy rooms without a roomId fall back to the display name.
+  const title = `Group: ${room.roomId || group}`
   const key = groupMemberKey(member)
   const known = room.sessions && room.sessions[key]
 
@@ -4143,6 +5050,145 @@ const GROUP_TURN_POLL_MS = 2000
 // timed out at 3 minutes, read as a pass, and its finished result never
 // reached the room (db's Aug 2026 report).
 const GROUP_TURN_HARD_CAP_MS = 20 * 60000
+
+/** Mirror a member's pending prompt — clarify question OR command approval —
+ *  from its resume snapshot into the room store, keyed
+ *  `${group}::${memberKey}` (#90694). Returns true while a prompt is
+ *  blocking, so the turn poll can extend its deadline — a waiting prompt
+ *  must not be eaten by the group-turn timeout. Feature-detected: older
+ *  backends without `pending_clarify`/`pending_approval` in the resume
+ *  payload always sync to "no prompt". Clarify wins when both are somehow
+ *  present (approvals resolve inside tool batches; clarify is the outer
+ *  blocker). */
+function syncGroupClarify(group, member, state) {
+  const key = `${group}::${groupMemberKey(member)}`
+  const clarify = state && typeof state.pending_clarify === 'object' ? state.pending_clarify : null
+  const approval = state && typeof state.pending_approval === 'object' ? state.pending_approval : null
+  const pending = clarify || approval
+  const requestId = pending?.request_id || null
+  const all = $groupClarify.get()
+  const current = all[key]
+
+  if (!requestId) {
+    if (current) {
+      const next = { ...all }
+      delete next[key]
+      $groupClarify.set(next)
+    }
+
+    return false
+  }
+
+  // Same request already mirrored — keep the object identity so the card
+  // doesn't lose its draft to a re-render.
+  if (current?.requestId === requestId) {
+    return true
+  }
+
+  const base = {
+    requestId,
+    group,
+    member: member.name,
+    memberKey: groupMemberKey(member),
+    // approval.respond keys on the session, not just the request — carry the
+    // runtime id the snapshot came from.
+    sessionId: state?.session_id || null,
+    at: Date.now()
+  }
+
+  $groupClarify.set({
+    ...all,
+    [key]: clarify
+      ? {
+          ...base,
+          kind: 'clarify',
+          question: typeof clarify.question === 'string' ? clarify.question : '',
+          choices: Array.isArray(clarify.choices) ? clarify.choices.filter(c => typeof c === 'string' && c) : [],
+          multiSelect: Boolean(clarify.multi_select),
+          // Batch clarifies carry `questions`; the room card answers them
+          // one wire call per question, mirroring the 1:1 batch contract.
+          questions: Array.isArray(clarify.questions) ? clarify.questions : null
+        }
+      : {
+          ...base,
+          kind: 'approval',
+          question: typeof approval.description === 'string' ? approval.description : '',
+          command: typeof approval.command === 'string' ? approval.command : '',
+          // The server precomputes the choice set from allow_permanent
+          // (once/session/always/deny); fall back to the minimal pair.
+          choices: Array.isArray(approval.choices) && approval.choices.length
+            ? approval.choices.filter(c => typeof c === 'string' && c)
+            : ['once', 'deny'],
+          multiSelect: false,
+          questions: null
+        }
+  })
+  // A blocked member is a question for the human — badge the room.
+  $groupNeedsYou.set({ ...$groupNeedsYou.get(), [group]: true })
+
+  return true
+}
+
+/** Drop every mirrored clarify belonging to `group` (disband/rename). */
+function clearGroupClarify(group) {
+  const all = $groupClarify.get()
+  const next = {}
+  let changed = false
+
+  for (const [key, value] of Object.entries(all)) {
+    if (value?.group === group) {
+      changed = true
+    } else {
+      next[key] = value
+    }
+  }
+
+  if (changed) {
+    $groupClarify.set(next)
+  }
+}
+
+/** Answer a member's pending prompt from the room. Routes to the member's
+ *  OWN source (requestForBot), so cross-connection members work.
+ *  - clarify: `clarify.respond`; batch questions send one respond per
+ *    question, sequentially — the LAST lock resolves the blocked tool
+ *    server-side (same contract as the 1:1 batch card). allow_expired
+ *    server-side makes racing the timeout harmless.
+ *  - approval: `approval.respond` with the choice (once/session/always/deny),
+ *    keyed by session + request_id — the same wire the 1:1 approval card
+ *    and native notifications use. */
+async function answerGroupClarify(entry, member, answers) {
+  if (entry.kind === 'approval') {
+    await requestForBot(member, 'approval.respond', {
+      session_id: entry.sessionId || undefined,
+      request_id: entry.requestId,
+      choice: typeof answers === 'string' && answers ? answers : 'deny'
+    })
+  } else if (entry.questions && entry.questions.length) {
+    for (const question of entry.questions) {
+      const qid = question?.qid ?? question?.id
+      await requestForBot(member, 'clarify.respond', {
+        request_id: entry.requestId,
+        question_id: qid,
+        answer: answers?.[qid] ?? ''
+      })
+    }
+  } else {
+    await requestForBot(member, 'clarify.respond', {
+      request_id: entry.requestId,
+      answer: typeof answers === 'string' ? answers : ''
+    })
+  }
+
+  const all = $groupClarify.get()
+  const key = `${entry.group}::${entry.memberKey}`
+
+  if (all[key]?.requestId === entry.requestId) {
+    const next = { ...all }
+    delete next[key]
+    $groupClarify.set(next)
+  }
+}
 
 /** One member turn, gateway-native: submit the room delta as a prompt into
  *  the member's per-group session, then poll the session until a NEW
@@ -4243,7 +5289,11 @@ async function runGroupChatMemberTurn(group, member, prompt, thread, images) {
 
     const messages = Array.isArray(state?.messages) ? state.messages : []
     const busy = Boolean(state?.inflight || state?.running)
-    const done = !busy
+    // A clarify blocking inside the member's session is a question for the
+    // HUMAN (#90694) — mirror it into the room store so a card renders, and
+    // hold the turn open: the member isn't stalling, it's waiting on us.
+    const awaitingUser = syncGroupClarify(group, member, state)
+    const done = !busy && !awaitingUser
 
     if (messages.length > before && done) {
       for (let i = messages.length - 1; i >= 0; i--) {
@@ -4272,16 +5322,20 @@ async function runGroupChatMemberTurn(group, member, prompt, thread, images) {
       return null
     }
 
-    // Still visibly working: extend the deadline (never past the hard cap).
-    if (busy) {
+    // Still visibly working — or waiting on the user's answer to a clarify:
+    // extend the deadline (never past the hard cap). A pending question must
+    // outlive the base turn timeout or it dies unanswered at 3 minutes.
+    if (busy || awaitingUser) {
       deadline = Math.min(started + GROUP_TURN_HARD_CAP_MS, Math.max(deadline, Date.now() + GROUP_TURN_TIMEOUT_MS))
     }
   }
 
-  // Timeout — reads as a pass, but remember the baseline + thread
+  // Timeout — clear any still-mirrored question card (the server-side
+  // clarify timeout runs its own course) and read as a pass, but remember the baseline + thread
   // (runtime-only) so the finished reply can be posted late into the RIGHT
   // thread instead of vanishing.
   recordGroupActivity(group, { kind: 'timed-out', member: member.name, thread })
+  syncGroupClarify(group, member, null)
   updateGroupChat(group, r => {
     r.stranded = { ...(r.stranded || {}), [groupMemberKey(member)]: { before, thread } }
     return r
@@ -4310,7 +5364,7 @@ async function harvestStrandedGroupReply(group, member) {
   try {
     const stored = room.sessions?.[memberKey]
     state = await requestForBot(member, 'session.resume', {
-      session_id: stored || `Group: ${group}`,
+      session_id: stored || `Group: ${room.roomId || group}`,
       profile: member.name
     })
   } catch {
@@ -4319,6 +5373,12 @@ async function harvestStrandedGroupReply(group, member) {
 
   if (state?.inflight || state?.running) {
     return // still grinding — keep waiting
+  }
+
+  // A stranded member blocked on a clarify is not "grinding" — surface the
+  // question card (#90694) and keep the marker until it resolves.
+  if (syncGroupClarify(group, member, state)) {
+    return
   }
 
   // Done (or dead): the marker is consumed either way.
@@ -4492,8 +5552,56 @@ async function runGroupChatRounds(group, members, thread) {
         r.turn = null
         return r
       })
+
+      // #89545: the loop's harvest pass only ran at the top of each round of
+      // an ACTIVE loop — a member whose turn timed out after the final round
+      // stayed stranded until the user's NEXT send. Poll for the late reply
+      // in the background (bounded) so long work is late, never lost.
+      // (window feature-detect: the engine also runs under node in tests.)
+      const strandedLeft = Object.keys(($groupChats.get()[group] || {}).stranded || {})
+
+      if (strandedLeft.length && typeof window !== 'undefined') {
+        void harvestStrandedUntilSettled(group, members, thread)
+      }
     }
   }
+}
+
+/** Bounded background harvest for members whose replies outlived the turn
+ *  loop. Polls every 5s for up to 5 minutes; stops early when nothing is
+ *  stranded, a new loop takes the room over (it harvests on its own), or the
+ *  room record disappears (disband). */
+async function harvestStrandedUntilSettled(group, members, thread) {
+  const HARVEST_INTERVAL_MS = 5000
+  const HARVEST_MAX_TRIES = 60
+
+  for (let attempt = 0; attempt < HARVEST_MAX_TRIES; attempt++) {
+    await new Promise(resolve => window.setTimeout(resolve, HARVEST_INTERVAL_MS))
+
+    const room = $groupChats.get()[group]
+
+    if (!room || room.running) {
+      return
+    }
+
+    const stranded = room.stranded || {}
+
+    if (!Object.keys(stranded).length) {
+      return
+    }
+
+    for (const member of members) {
+      if (Object.prototype.hasOwnProperty.call(stranded, groupMemberKey(member))) {
+        try {
+          await harvestStrandedGroupReply(group, member)
+        } catch {
+          // Best-effort: the next tick retries; the bound stops runaways.
+        }
+      }
+    }
+  }
+
+  recordGroupActivity(group, { kind: 'failed', member: null, thread })
 }
 
 /** User send into a group room. `thread` continues that thread (its reply
@@ -4512,6 +5620,13 @@ function sendToGroupChat(group, members, text, thread, images) {
   const target = thread || mintGroupThreadId()
 
   $groupNeedsYou.set({ ...$groupNeedsYou.get(), [group]: false })
+  // Refresh the durable room roster on every send. This backfills rooms made
+  // by older Desktop builds and keeps the gateway mirror complete even when
+  // members overlap across multiple groups.
+  updateGroupChat(group, room => {
+    room.members = durableGroupChatMembers(members)
+    return room
+  })
   appendGroupChatEntry(group, { kind: 'user', name: 'You' }, trimmed, target, attached)
 
   const wasRunning = ($groupChats.get()[group] || {}).running === true
@@ -4762,17 +5877,55 @@ function generatedSessionTitle(session, preview) {
  *  seconds is treated as "active now" (pulsing dot in its row). */
 const ACTIVE_WINDOW_S = 90
 
+/** The session whose activity best represents this bot — the FRESHER of the
+ *  canonical Bot Chat (canonical_session, the profile's "Bot Chat" registry
+ *  row resolved server-side by name) and the profile's newest visible
+ *  conversation (last_session).
+ *
+ *  Canonical Bot Chats are hidden from the session list by design, so
+ *  last_session alone never sees them: a bot you talk to all day through its
+ *  Bot Chat reads "6d ago" because its newest VISIBLE session is a week old.
+ *  Every activity signal (age label, pulse dot, unread watermark, recency
+ *  sort) keys off this helper. Older gateways without the canonical_session
+ *  field degrade to last_session unchanged. */
+function botActivitySession(bot) {
+  const preferred = bot?.canonical_session
+  const last = bot?.last_session
+
+  if (!preferred || !last) {
+    return preferred || last || null
+  }
+
+  return (preferred.last_active || 0) >= (last.last_active || 0) ? preferred : last
+}
+
+/** Worker liveness window: kanban/tool workers heartbeat last_activity_at
+ *  at least every 60s while running (agent/session_activity.py), so a
+ *  worker whose stamp is older than this is finished or stalled. Wider
+ *  than ACTIVE_WINDOW_S to bridge one missed heartbeat. */
+const WORKER_ACTIVE_WINDOW_S = 150
+
+/** True while this bot's freshest kanban/tool worker looks alive. Workers
+ *  never surface in conversation lists, so without this a profile grinding
+ *  through a 30-minute kanban task reads idle ("3 hr ago") the whole time
+ *  (hermes-agent#90268). Older gateways omit worker_session — always false. */
+function workerActiveAt(bot, now = Date.now()) {
+  const ts = bot?.worker_session?.last_active || 0
+  return Boolean(ts && now / 1000 - ts < WORKER_ACTIVE_WINDOW_S)
+}
+
 /** Bots that are working right now: the profile the gateway is running a
- *  turn for (busy), plus any bot whose last message landed inside the
- *  liveness window. Pure — output follows the input roster's order, so
- *  presence never reorders or hides the normal list. */
+ *  turn for (busy), any bot whose last message landed inside the liveness
+ *  window, plus any bot with a live kanban/tool worker. Pure — output
+ *  follows the input roster's order, so presence never reorders or hides
+ *  the normal list. */
 function activeBots(roster, activeProfile, gatewayState, now = Date.now()) {
   return (roster || []).filter(bot => {
     const busyTurn = !bot.remoteSource && bot.name === activeProfile && gatewayState === 'busy'
-    const last = bot.last_session?.last_active || 0
+    const last = botActivitySession(bot)?.last_active || 0
     const inWindow = Boolean(last && now / 1000 - last < ACTIVE_WINDOW_S)
 
-    return busyTurn || inWindow
+    return busyTurn || inWindow || workerActiveAt(bot, now)
   })
 }
 
@@ -4797,7 +5950,23 @@ function BotRow({ bot, onDelete, onEdit, onGroup }) {
   // Keep user photos/pets. Drop the 160px SVG backfill so the math face can move.
   const photo = Boolean(image && !isBackfilledFacePng(image))
   const gatewayState = useValue(host.state.gateway)
-  const activeNow = Boolean(last?.last_active && Date.now() / 1000 - last.last_active < ACTIVE_WINDOW_S)
+  // Preview identity must match click identity (#88200): when the backend
+  // resolved the pinned canonical chat, preview THAT session — not the
+  // profile's most recent (but unrelated) activity. Activity signals
+  // (age label, pulse dot) follow the same rule via botActivitySession:
+  // the canonical Bot Chat is hidden from last_session, so keying age off
+  // last_session alone shows "6d ago" on a bot you just messaged.
+  const previewSession = bot.canonical_session || last
+  const activitySession = botActivitySession(bot)
+  // A live kanban/tool worker counts as activity (#90268): pulse + fresh
+  // age while it runs, falling back to chat activity when it ends.
+  const workerActive = workerActiveAt(bot)
+  const activeNow =
+    workerActive ||
+    Boolean(activitySession?.last_active && Date.now() / 1000 - activitySession.last_active < ACTIVE_WINDOW_S)
+  const rowAgeTs = workerActive
+    ? Math.max(activitySession?.last_active || 0, bot.worker_session?.last_active || 0)
+    : activitySession?.last_active || 0
   // Work pose only when this bot is actually doing something: the active
   // profile while the gateway is busy, or a bot that wrote within the
   // liveness window. Not every bot whenever the gateway is busy.
@@ -4806,13 +5975,8 @@ function BotRow({ bot, onDelete, onEdit, onGroup }) {
   // thin to rich; conditionally calling useValue here breaks React hook order.
   const unreadByName = useValue($botUnread)
   const unread = !bot.remoteSource && Boolean(unreadByName[bot.name])
-  // WHO sent the last message (bot-to-bot DM vs human) — the full stored
-  // history lives in the Sessions workspace (context menu), not inline.
-  // Preview identity must match click identity (#88200): when the backend
-  // resolved the pinned canonical chat, preview THAT session — not the
-  // profile's most recent (but unrelated) activity. Liveness checks above
-  // keep last_session semantics: any recent activity means the bot is alive.
-  const previewSession = bot.preferred_session || last
+  // WHO sent the last message (bot-to-bot DM vs human) — shown in the row
+  // preview; the conversation itself lives in the bot's one canonical chat.
   const { fromBot } = previewKind(previewSession?.preview)
   // DM previews read like DMs: strip the delivery prefix, keep the message.
   const displayPreview = stripPreviewMarkdown(
@@ -4860,8 +6024,6 @@ function BotRow({ bot, onDelete, onEdit, onGroup }) {
       return
     }
 
-    let pinnedChat = meta?.chat
-
     if (!bot.remoteSource && $botUnread.get()[bot.name]) {
       const next = { ...$botUnread.get() }
       delete next[bot.name]
@@ -4871,7 +6033,7 @@ function BotRow({ bot, onDelete, onEdit, onGroup }) {
     // Activate the owner first so every canonical-chat RPC lands on the
     // backend that owns this bot's state database.
     try {
-      pinnedChat = await prepareBotSource(bot, pinnedChat)
+      await prepareBotSource(bot)
     } catch (error) {
       host.notifyError?.(error, `Could not reach ${bot.connectionLabel || 'the remote source'}`)
 
@@ -4883,7 +6045,10 @@ function BotRow({ bot, onDelete, onEdit, onGroup }) {
     }
 
     try {
-      const id = await openBotCanonicalChat(bot.name, pinnedChat, previewSession)
+      // Identity is the NAMED registry row (profile → session titled
+      // "Bot Chat"), resolved fresh on every click — preview identity and
+      // click identity agree because both describe that same row (#88200).
+      const id = await openBotCanonicalChat(bot.name)
 
       if (generation === botOpenGeneration && id) {
         return
@@ -4980,13 +6145,13 @@ function BotRow({ bot, onDelete, onEdit, onGroup }) {
               activeNow
                 ? jsx('span', {
                     className: 'hermes-bots-pulse size-1.5 shrink-0 rounded-full bg-(--ui-accent,#4f9cf9)',
-                    title: 'Active in the last 90s'
+                    title: workerActive ? 'Working on a task right now' : 'Active in the last 90s'
                   })
                 : null,
-              last
+              rowAgeTs
                 ? jsx('span', {
                     className: 'shrink-0 text-[0.6875rem] text-(--ui-text-quaternary)',
-                    children: relativeTime(last.last_active * 1000)
+                    children: relativeTime(rowAgeTs * 1000)
                   })
                 : null
             ]
@@ -5060,10 +6225,6 @@ function BotRow({ bot, onDelete, onEdit, onGroup }) {
             children: meta?.hidden ? 'Unhide Bot' : 'Hide Bot'
           }),
           jsx(ContextMenuSeparator, {}),
-          jsx(ContextMenuItem, {
-            onSelect: () => openBotSessionsWorkspace(bot),
-            children: 'Sessions'
-          }),
           jsx(ContextMenuItem, { onSelect: () => onEdit(bot), children: 'Edit Profile' }),
           !bot.remoteSource
             ? jsx(ContextMenuItem, {
@@ -6158,7 +7319,10 @@ function CreateAgentDialog({ open, onClose, roster }) {
 
     host
       .connections()
-      .then(value => setConnections(Array.isArray(value) ? value : []))
+      // host.connections() returns the registry ROWS on current SDKs, but the
+      // envelope object ({version, primary, connections: [...]}) on desktops
+      // that predate the SDK-side unwrap — accept both shapes.
+      .then(value => setConnections(Array.isArray(value) ? value : Array.isArray(value?.connections) ? value.connections : []))
       .catch(() => setConnections([]))
   }, [open, connections])
 
@@ -7089,13 +8253,6 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\"'\"'")}'`
 }
 
-/** Escape for interpolation INSIDE an existing double-quoted shell string:
- *  keeps ", `, $, and \ literal so free-text titles (which sync from ui_meta)
- *  and gateway profile names can't expand or break out of the quotes. */
-function shellDoubleQuote(value) {
-  return String(value).replace(/[\\"`$]/g, ch => '\\' + ch)
-}
-
 function routineInputError(title, instruction) {
   if (String(title).includes('\0')) {
     return 'Cronjob name cannot contain NUL (U+0000).'
@@ -7460,6 +8617,11 @@ function CreateRoutineDialog({ bot, open, onClose }) {
   const [instruction, setInstruction] = useState('')
   const [sched, setSched] = useState(defaultScheduleState())
   const [continuity, setContinuity] = useState(false)
+  // Where the run's output lands: 'history' = the run session only (Run
+  // history / cron page, today's behavior); 'bot-chat' = inject into this
+  // bot's canonical Bot Chat as a real message — the bot reads it, acts on
+  // it, and responds there (costs the bot one agent turn per run).
+  const [target, setTarget] = useState('history')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const activeProfile = useValue(host.state.profile)
@@ -7470,6 +8632,7 @@ function CreateRoutineDialog({ bot, open, onClose }) {
     setInstruction('')
     setSched(defaultScheduleState())
     setContinuity(false)
+    setTarget('history')
     setBusy(false)
     setError(null)
   }
@@ -7503,7 +8666,11 @@ function CreateRoutineDialog({ bot, open, onClose }) {
         prompt: routinePrompt(bot, title, task, activeProfile),
         ...(bot ? { profile: bot } : {}),
         ...(repeatN ? { repeat: repeatN } : {}),
-        ...(continuity ? { continuity: true } : {})
+        ...(continuity ? { continuity: true } : {}),
+        // 'bot-chat' (bare, no name): the job is created IN the bot's own
+        // cron store (profile scoping above), so the scheduler resolves the
+        // token to that profile — no cross-gateway name ambiguity possible.
+        ...(target === 'bot-chat' ? { deliver: 'bot-chat' } : {})
       })
       await invalidateRoutineOwner(bot)
       host.notify({ kind: 'success', message: `Cronjob "${title}" scheduled` })
@@ -7556,6 +8723,13 @@ function CreateRoutineDialog({ bot, open, onClose }) {
               })
             ),
             labeled('When to run', jsx(SchedulePicker, { state: sched, setState: setSched })),
+            labeled(
+              'Send results to',
+              pickerSelect(target, setTarget, [
+                { id: 'history', label: 'Run history only' },
+                { id: 'bot-chat', label: `${displayName({ name: bot }, $botMeta.get()[bot])}\u2019s chat (bot responds)` }
+              ])
+            ),
             jsxs('label', {
               className: 'flex items-center gap-2 text-xs text-(--ui-text-tertiary) cursor-pointer select-none',
               children: [
@@ -7759,162 +8933,6 @@ function RoutinesPane() {
         // key is the jsx() THIRD argument — as a prop it is silently ignored
         // and the dialog kept stale per-bot form state when the target changed.
       }, createTarget)
-    ]
-  })
-}
-
-// ── profile session workspace ────────────────────────────────────────────────
-
-const PROFILE_SESSION_LIST_LIMIT = 200
-
-function openBotSessionsWorkspace(bot) {
-  if (bot?.name && NAME_RE.test(bot.name)) {
-    $botSessionsWorkspace.set(bot.name)
-  }
-}
-
-function filterProfileSessions(sessions, query) {
-  const needle = String(query || '').trim().toLowerCase()
-  const rows = Array.isArray(sessions) ? sessions : []
-  if (!needle) return rows
-  return rows.filter(session =>
-    `${session?.title || ''} ${session?.preview || ''} ${session?.source || ''}`.toLowerCase().includes(needle)
-  )
-}
-
-function useProfileSessions(botName, gatewayGeneration) {
-  return useQuery({
-    queryKey: [ID, 'profile-sessions', botName, gatewayGeneration],
-    enabled: Boolean(botName),
-    // include_hidden: this browser exists precisely to see the profile's own
-    // (always-hidden) Bot Mode sessions alongside its regular ones.
-    queryFn: () => host.request('session.list', { profile: botName, limit: PROFILE_SESSION_LIST_LIMIT, include_hidden: true }),
-    refetchInterval: 8000,
-    staleTime: 4000,
-    retry: false
-  })
-}
-
-async function openProfileSession(botName, session, gatewayGeneration) {
-  const profile = String(botName || '')
-  const id = String(session?.id || '')
-  if (!NAME_RE.test(profile) || !id || gatewayGeneration !== $sessionsGatewayGeneration.get()) return
-  if (typeof host.openSession !== 'function') {
-    throw new Error('This Hermes Desktop version cannot open stored sessions')
-  }
-
-  // Same hydration contract as canonical Bot Chats (#89206): a bare open can
-  // focus a main surface whose runtime/transcript silently vanished, leaving a
-  // blank pane while the row preview still shows the conversation. Waiting on
-  // hydration lets the SDK issue the explicit resume when the surface is stale.
-  const hasAuthoritativeCount =
-    typeof session?.message_count === 'number' && Number.isFinite(session.message_count)
-  const expectHistory = hasAuthoritativeCount ? session.message_count > 0 : Boolean(session?.preview)
-
-  await host.openSession(id, { profile, awaitHydration: true, expectHistory, keepAllProfilesScope: false })
-  if (gatewayGeneration !== $sessionsGatewayGeneration.get()) return
-  $botSelectedSessions.set({ ...$botSelectedSessions.get(), [profile]: id })
-}
-
-function ProfileSessionRow({ session, botName, active, gatewayGeneration }) {
-  return jsxs('button', {
-    type: 'button',
-    'aria-current': active ? 'page' : undefined,
-    onClick: () => void openProfileSession(botName, session, gatewayGeneration).catch(err => host.notifyError(err, 'Could not open session')),
-    className: cn(
-      'flex w-full flex-col gap-0.5 overflow-hidden rounded-md px-2 py-1.5 text-left transition-colors',
-      'hover:bg-(--chrome-action-hover)',
-      active && 'bg-(--ui-row-active-background)'
-    ),
-    children: [
-      jsx('span', {
-        className: 'truncate text-[0.8125rem] font-medium',
-        children: session.title || 'Untitled session'
-      }),
-      jsx('div', {
-        className: 'truncate text-[0.7rem] text-(--ui-text-tertiary)',
-        children: session.preview || session.source || 'No messages yet'
-      })
-    ]
-  })
-}
-
-function ProfileSessionsWorkspace({ bot }) {
-  const gatewayGeneration = useValue($sessionsGatewayGeneration)
-  const { data, isLoading, error } = useProfileSessions(bot.name, gatewayGeneration)
-  const selectedByProfile = useValue($botSelectedSessions)
-  const [query, setQuery] = useState('')
-  const sourceSessions = data?.sessions || []
-  const sessions = filterProfileSessions(sourceSessions, query)
-  const inventoryBounded = sourceSessions.length >= PROFILE_SESSION_LIST_LIMIT
-  const selectedId = selectedByProfile[bot.name] || ''
-
-  const header = jsxs('div', {
-    className: 'flex items-center gap-2 px-2.5 pt-2.5 pb-2',
-    children: [
-      jsx(Button, {
-        variant: 'ghost',
-        size: 'sm',
-        onClick: () => $botSessionsWorkspace.set(null),
-        children: 'Back'
-      }),
-      jsx('div', {
-        className: 'min-w-0 flex-1 truncate text-sm font-semibold',
-        children: `${displayName(bot, $botMeta.get()[bot.name])} sessions`
-      })
-    ]
-  })
-
-  return jsxs('div', {
-    className: 'flex h-full flex-col',
-    children: [
-      header,
-      jsx('div', {
-        className: 'px-2 pb-2',
-        children: jsx(Input, {
-          'aria-label': 'Filter sessions',
-          placeholder: 'Filter sessions…',
-          value: query,
-          onChange: event => setQuery(event.target.value)
-        })
-      }),
-      inventoryBounded
-        ? jsx('div', {
-            className: 'px-2.5 pb-2 text-[0.65rem] text-(--ui-text-quaternary)',
-            children: `Showing the ${PROFILE_SESSION_LIST_LIMIT} most recent sessions.`
-          })
-        : null,
-      isLoading
-        ? jsx('div', {
-            className: 'flex flex-1 items-center justify-center',
-            children: jsx(GlyphSpinner, { spinner: 'breathe' })
-          })
-        : error
-          ? jsx('div', {
-              className: 'px-3 py-3 text-xs text-(--ui-text-tertiary)',
-              children: 'Could not load sessions for this profile.'
-            })
-          : jsx(ScrollArea, {
-              className: 'min-h-0 flex-1',
-              children: jsx('div', {
-                className: 'grid gap-0.5 px-1.5 pb-2',
-                children: sessions.length
-                  ? sessions.map(session => jsx(ProfileSessionRow, {
-                      session,
-                      botName: bot.name,
-                      active: selectedId === session.id,
-                      gatewayGeneration
-                    }, session.id))
-                  : jsx('div', {
-                      className: 'px-2 py-3 text-center text-xs text-(--ui-text-tertiary)',
-                      children: query.trim()
-                        ? inventoryBounded
-                          ? `No matching sessions in the ${PROFILE_SESSION_LIST_LIMIT} most recent.`
-                          : 'No sessions match that filter.'
-                        : 'No stored sessions yet.'
-                    })
-              })
-            })
     ]
   })
 }
@@ -8268,9 +9286,9 @@ function CreateGroupChatDialog({ open, roster, onClose, onCreated }) {
   const canCreate = selected.length >= 2 && Boolean(name.trim() || selected.length)
 
   const create = () => {
-    let groupName = (name.trim() || placeholder).slice(0, 64)
+    const base = (name.trim() || placeholder).slice(0, 64)
 
-    if (selected.length < 2 || !groupName) {
+    if (selected.length < 2 || !base) {
       return
     }
 
@@ -8278,8 +9296,11 @@ function CreateGroupChatDialog({ open, roster, onClose, onCreated }) {
     // group under an existing name (easy — the default name is just the
     // member names) silently reopens the old room with its full log, which
     // reads as "not a fresh group" (db's Aug 2026 report). Uniquify against
-    // both live rooms and any bot's current grouping.
-    const taken = new Set(Object.keys($groupChats.get()))
+    // both live rooms and any bot's current grouping, then mint a fresh
+    // roomId: member sessions are titled by that roomId, so a
+    // disbanded-and-recreated group with the SAME display name still gets
+    // new sessions instead of resuming the old room's by title.
+    const taken = new Set(liveGroupChatNames())
 
     for (const meta of Object.values($botMeta.get() || {})) {
       for (const existing of botGroups(meta)) {
@@ -8287,15 +9308,8 @@ function CreateGroupChatDialog({ open, roster, onClose, onCreated }) {
       }
     }
 
-    if (taken.has(groupName)) {
-      let n = 2
-
-      while (taken.has(`${groupName} ${n}`)) {
-        n += 1
-      }
-
-      groupName = `${groupName} ${n}`.slice(0, 64)
-    }
+    const groupName = uniqueGroupChatName(base, taken)
+    const roomId = mintGroupRoomId()
 
     for (const bot of selected) {
       if (!bot.remoteSource) {
@@ -8310,6 +9324,7 @@ function CreateGroupChatDialog({ open, roster, onClose, onCreated }) {
 
     updateGroupChat(groupName, room => {
       room.members = roomMembers
+      room.roomId = roomId
 
       if (image) {
         room.image = image
@@ -8526,7 +9541,7 @@ function mentionTokenAt(text, caret) {
  *  the strings parseGroupChatMentions resolves. Keyboard: Up/Down navigate,
  *  Enter/Tab insert (Enter falls through to submit when the popover is
  *  closed), Escape dismisses. */
-function GroupMentionInput({ members, onChange, value, ...inputProps }) {
+function GroupMentionInput({ members, onChange, onSubmitDraft, value, ...inputProps }) {
   const allMeta = useValue($botMeta)
   const inputRef = useRef(null)
   const [token, setToken] = useState(null)
@@ -8543,14 +9558,26 @@ function GroupMentionInput({ members, onChange, value, ...inputProps }) {
 
     for (const member of members) {
       const handle = String(member.handle || botHandle(member.name, member) || '').trim()
+      const display = displayName(member, botRosterMeta(member, allMeta))
+      // Renamed members complete on their friendly tag; parser resolves both.
+      const tag = String(botMentionTag(member) || handle).trim()
 
-      if (!handle || (token.query && !handle.toLowerCase().startsWith(token.query))) {
+      if (!tag) {
+        continue
+      }
+
+      if (
+        token.query &&
+        !tag.toLowerCase().startsWith(token.query) &&
+        !(handle && handle.toLowerCase().startsWith(token.query)) &&
+        !display.toLowerCase().startsWith(token.query)
+      ) {
         continue
       }
 
       options.push({
-        handle,
-        meta: displayName(member, botRosterMeta(member, allMeta))
+        handle: tag,
+        meta: display
       })
     }
   }
@@ -8617,32 +9644,55 @@ function GroupMentionInput({ members, onChange, value, ...inputProps }) {
             )
           })
         : null,
-      jsx(Input, {
+      jsx(Textarea, {
         ...inputProps,
         ref: inputRef,
         value,
+        rows: 1,
+        // Multi-line room prompts (#89884): the composer was a single-line
+        // Input whose form submitted on every Enter — newlines were
+        // impossible. Enter (no Shift) still submits via onSubmitDraft;
+        // Shift+Enter falls through to the textarea's native newline.
+        className: cn('max-h-40 min-h-9 resize-none', inputProps.className),
         onChange: event => {
           onChange(event.target.value)
           refreshToken(event.target)
         },
         onClick: event => refreshToken(event.target),
         onKeyDown: event => {
-          if (!open) {
-            return
+          if (open) {
+            if (event.key === 'ArrowDown') {
+              event.preventDefault()
+              setSelected((active + 1) % options.length)
+
+              return
+            }
+
+            if (event.key === 'ArrowUp') {
+              event.preventDefault()
+              setSelected((active - 1 + options.length) % options.length)
+
+              return
+            }
+
+            if (event.key === 'Enter' || event.key === 'Tab') {
+              event.preventDefault()
+              insert(options[active].handle)
+
+              return
+            }
+
+            if (event.key === 'Escape') {
+              event.preventDefault()
+              setToken(null)
+
+              return
+            }
           }
 
-          if (event.key === 'ArrowDown') {
+          if (event.key === 'Enter' && !event.shiftKey) {
             event.preventDefault()
-            setSelected((active + 1) % options.length)
-          } else if (event.key === 'ArrowUp') {
-            event.preventDefault()
-            setSelected((active - 1 + options.length) % options.length)
-          } else if (event.key === 'Enter' || event.key === 'Tab') {
-            event.preventDefault()
-            insert(options[active].handle)
-          } else if (event.key === 'Escape') {
-            event.preventDefault()
-            setToken(null)
+            onSubmitDraft?.()
           }
         },
         onBlur: () => setToken(null)
@@ -8651,7 +9701,175 @@ function GroupMentionInput({ members, onChange, value, ...inputProps }) {
   })
 }
 
-function GroupChatWorkspace({ group, members, onBack }) {
+/** One member's pending prompt, rendered in the room (#90694).
+ *  - clarify: choices as tap buttons (multi-select stages; single-select
+ *    stages one), free text always available, batch sub-questions each get
+ *    their own input.
+ *  - approval: the command in a code row plus the server's choice set
+ *    (once/session/always/deny) as buttons — no free text; approvals are a
+ *    closed choice. Answer sends via the member's own source. */
+function GroupClarifyCard({ entry, members }) {
+  const { group } = entry
+  const isApproval = entry.kind === 'approval'
+  const member = members.find(m => groupMemberKey(m) === entry.memberKey) || members.find(m => m.name === entry.member)
+  const [drafts, setDrafts] = useState({})
+  const [picked, setPicked] = useState({})
+  const [sending, setSending] = useState(false)
+  const questions = entry.questions && entry.questions.length
+    ? entry.questions.map((q, i) => ({
+        qid: q?.qid ?? q?.id ?? `q${i}`,
+        question: typeof q?.question === 'string' ? q.question : '',
+        choices: Array.isArray(q?.choices) ? q.choices.filter(c => typeof c === 'string' && c) : [],
+        multiSelect: Boolean(q?.multi_select ?? q?.multiSelect)
+      }))
+    : [{ qid: '__single__', question: entry.question, choices: entry.choices, multiSelect: entry.multiSelect }]
+
+  const answerFor = q => {
+    const chosen = picked[q.qid] || []
+
+    if (chosen.length) {
+      return q.multiSelect ? JSON.stringify(chosen) : chosen[0]
+    }
+
+    return isApproval ? '' : (drafts[q.qid] || '').trim()
+  }
+
+  const allAnswered = questions.every(q => answerFor(q))
+
+  const submit = async () => {
+    if (!member || sending || !allAnswered) {
+      return
+    }
+
+    setSending(true)
+
+    try {
+      if (isApproval || !(entry.questions && entry.questions.length)) {
+        await answerGroupClarify(entry, member, answerFor(questions[0]))
+      } else {
+        const answers = {}
+
+        for (const q of questions) {
+          answers[q.qid] = answerFor(q)
+        }
+
+        await answerGroupClarify(entry, member, answers)
+      }
+
+      // Echo the exchange into the room log so the thread reads complete.
+      const summary = isApproval
+        ? `${answerFor(questions[0])} — ${entry.command || entry.question || 'command approval'}`
+        : questions
+            .map(q => (questions.length > 1 ? `${q.question}: ${answerFor(q)}` : answerFor(q)))
+            .join('\n')
+      appendGroupChatEntry(group, { kind: 'user', name: 'You' }, summary, entry.thread || 'legacy')
+    } catch (err) {
+      host.notify({ kind: 'error', message: `Could not send the answer to @${botHandle(entry.member, member)}: ${err?.message || err}` })
+    } finally {
+      setSending(false)
+    }
+  }
+
+  return jsxs('div', {
+    className:
+      'grid gap-1.5 rounded-md border border-(--ui-accent,#4f9cf9)/50 bg-(--ui-accent,#4f9cf9)/5 px-2.5 py-2',
+    children: [
+      jsxs('div', {
+        className: 'flex items-center gap-1.5 text-xs font-medium',
+        children: [
+          jsx(Codicon, {
+            name: isApproval ? 'shield' : 'question',
+            className: 'shrink-0 text-(--ui-accent,#4f9cf9)'
+          }),
+          isApproval
+            ? `@${botHandle(entry.member, member)} wants to run a command:`
+            : `@${botHandle(entry.member, member)} asks:`
+        ]
+      }),
+      isApproval && entry.command
+        ? jsx('code', {
+            className:
+              'block overflow-x-auto rounded bg-(--ui-bg-secondary,rgba(0,0,0,0.25)) px-2 py-1 font-mono text-[0.7rem] whitespace-pre-wrap break-all',
+            children: entry.command
+          })
+        : null,
+      ...questions.map(q =>
+        jsxs('div', {
+          className: 'grid gap-1',
+          children: [
+            q.question
+              ? jsx('div', { className: 'text-xs whitespace-pre-wrap', children: q.question })
+              : null,
+            q.choices.length
+              ? jsx('div', {
+                  className: 'flex flex-wrap gap-1',
+                  children: q.choices.map(choice => {
+                    const chosen = (picked[q.qid] || []).includes(choice)
+
+                    return jsx(Button, {
+                      size: 'sm',
+                      variant: chosen ? 'default' : 'secondary',
+                      className: cn(
+                        'h-6 px-2 text-[0.7rem]',
+                        isApproval && choice === 'deny' && !chosen && 'text-destructive'
+                      ),
+                      onClick: () => {
+                        setDrafts(prev => ({ ...prev, [q.qid]: '' }))
+                        setPicked(prev => {
+                          const current = prev[q.qid] || []
+                          const next = q.multiSelect
+                            ? chosen
+                              ? current.filter(c => c !== choice)
+                              : [...current, choice]
+                            : chosen
+                              ? []
+                              : [choice]
+
+                          return { ...prev, [q.qid]: next }
+                        })
+                      },
+                      children: choice
+                    }, `choice:${q.qid}:${choice}`)
+                  })
+                })
+              : null,
+            // Approvals are a closed choice set — no free-text input.
+            isApproval
+              ? null
+              : jsx(Input, {
+                  'aria-label': `Answer @${entry.member}`,
+                  placeholder: q.choices.length ? 'Or type your own answer…' : 'Type your answer…',
+                  value: drafts[q.qid] || '',
+                  onChange: event => {
+                    const value = event.target.value
+                    setPicked(prev => ({ ...prev, [q.qid]: [] }))
+                    setDrafts(prev => ({ ...prev, [q.qid]: value }))
+                  },
+                  onKeyDown: event => {
+                    if (event.key === 'Enter' && questions.length === 1) {
+                      event.preventDefault()
+                      void submit()
+                    }
+                  },
+                  className: 'h-7 text-xs'
+                }, `input:${q.qid}`)
+          ]
+        }, `q:${q.qid}`)
+      ),
+      jsx('div', {
+        className: 'flex justify-end',
+        children: jsx(Button, {
+          size: 'sm',
+          disabled: sending || !allAnswered || !member,
+          onClick: () => void submit(),
+          children: sending ? 'Sending…' : isApproval ? 'Respond' : 'Answer'
+        })
+      })
+    ]
+  })
+}
+
+function GroupChatWorkspace({ group, members, onBack, visible = true }) {
   const rooms = useValue($groupChats)
   const allMeta = useValue($botMeta)
   const room = rooms[group] || { log: [], running: false }
@@ -8674,6 +9892,55 @@ function GroupChatWorkspace({ group, members, onBack }) {
   // composer, otherwise the reply box of that thread. Data URLs, already
   // downscaled — they ride the send into every responding member's session.
   const [pendingImages, setPendingImages] = useState({})
+
+  // Scroll anchoring (#89835): rooms used to open at scroll position 0 and
+  // stay there while replies streamed in. Scroll the bottom sentinel into
+  // view on mount and whenever the log grows — but only when the user is
+  // already near the bottom, so reading history is never yanked away.
+  const bottomSentinelRef = useRef(null)
+  const stickToBottomRef = useRef(true)
+
+  useEffect(() => {
+    const sentinel = bottomSentinelRef.current
+
+    if (!sentinel) {
+      return
+    }
+
+    const viewport = sentinel.closest('[data-slot="scroll-area-viewport"]')
+
+    if (viewport) {
+      const onScroll = () => {
+        stickToBottomRef.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 80
+      }
+
+      viewport.addEventListener('scroll', onScroll, { passive: true })
+
+      return () => viewport.removeEventListener('scroll', onScroll)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (stickToBottomRef.current) {
+      bottomSentinelRef.current?.scrollIntoView({ block: 'end' })
+    }
+  }, [room.log.length, room.running])
+
+  // Retained-pane reopen (#89835 follow-up): a hot-mounted room pane stays
+  // mounted while another workspace tab is active, so returning to it never
+  // remounts and the mount-time anchor doesn't rerun. Re-anchor on the
+  // hidden → visible edge — an explicit reopen, so it overrides a stale
+  // read-position and mirrors what a fresh open does.
+  const wasVisibleRef = useRef(visible)
+
+  useEffect(() => {
+    if (visible && !wasVisibleRef.current) {
+      stickToBottomRef.current = true
+      bottomSentinelRef.current?.scrollIntoView({ block: 'end' })
+    }
+
+    wasVisibleRef.current = visible
+  }, [visible])
 
   const imagesFor = thread => pendingImages[thread ?? 'main'] || []
 
@@ -8731,6 +9998,11 @@ function GroupChatWorkspace({ group, members, onBack }) {
   const [activityOpen, setActivityOpen] = useState(false)
   // Subscribe: activity rows re-render as turn events land.
   useValue($groupActivity)
+  // Pending member questions for THIS room (#90694), oldest first.
+  const clarifyAll = useValue($groupClarify)
+  const roomClarifies = Object.values(clarifyAll || {})
+    .filter(entry => entry?.group === group)
+    .sort((a, b) => (a.at || 0) - (b.at || 0))
 
   const header = jsxs('div', {
     className: 'flex items-center gap-2 px-2.5 pt-2.5 pb-2',
@@ -9182,6 +10454,7 @@ function GroupChatWorkspace({ group, members, onBack }) {
                     members,
                     value: replyDrafts[id] || '',
                     onChange: text => setReplyDrafts(prev => ({ ...prev, [id]: text })),
+                    onSubmitDraft: () => submitReply(id),
                     onPaste: event => pasteImages(id, event)
                   }),
                   attachButton(id),
@@ -9251,14 +10524,23 @@ function GroupChatWorkspace({ group, members, onBack }) {
                     children: 'Say something — every bot in this group hears the room.'
                   }, 'empty')
                 ]),
+            ...roomClarifies.map(entry =>
+              jsx(GroupClarifyCard, { entry, members }, `clarify:${entry.memberKey}:${entry.requestId}`)
+            ),
             room.running
               ? jsx('div', {
                   className: 'px-2 py-1 text-[0.7rem] italic text-(--ui-text-quaternary)',
-                  children: room.turn
-                    ? `${groupSpeakerLabel(room.turn)} is thinking…`
-                    : 'The room is working…'
+                  children: roomClarifies.length
+                    ? 'Waiting for your answer…'
+                    : room.turn
+                      ? `${groupSpeakerLabel(room.turn)} is thinking…`
+                      : 'The room is working…'
                 }, 'working')
-              : null
+              : null,
+            // Scroll anchor (#89835): rooms opened at scroll position 0, mid-
+            // history. The effect below scrolls this sentinel into view on
+            // mount and on log growth — unless the user has scrolled up.
+            jsx('div', { ref: bottomSentinelRef, 'aria-hidden': true }, 'bottom-sentinel')
           ]
         })
       }),
@@ -9281,6 +10563,7 @@ function GroupChatWorkspace({ group, members, onBack }) {
                   members,
                   value: draft,
                   onChange: setDraft,
+                  onSubmitDraft: submit,
                   onPaste: event => pasteImages(null, event)
                 }),
                 attachButton(null),
@@ -9310,9 +10593,9 @@ function GroupChatWorkspace({ group, members, onBack }) {
             jsx('span', { className: 'font-medium text-foreground', children: group }),
             ' grouping from its ',
             String(members.length),
-            ' bots and clears the shared room log. The bots themselves and their “Group: ',
-            group,
-            '” sessions are kept — you can still open those from each bot’s session browser.'
+            // New rooms title member sessions by roomId, legacy rooms by name —
+            // so the copy names the concept, not a literal session title.
+            ' bots and clears the shared room log. The bots themselves and their per-group sessions are kept.'
           ]
         }),
         destructive: true,
@@ -9333,10 +10616,40 @@ function GroupChatWorkspace({ group, members, onBack }) {
  *  disband (or the room view's own Back) can retire the tab it opened. */
 const groupChatMainTabs = new Map()
 
+/** Reactive shadow of `groupChatMainTabs` membership. The Map itself can't
+ *  notify React, and #89788's first fix read it non-reactively: a BotsPane
+ *  render that landed between selecting the group and recording its main
+ *  tab kept the in-pane room on screen forever (the map write repaints
+ *  nothing). Every map mutation goes through the two helpers below so the
+ *  rev bump re-evaluates the gate. */
+const $groupMainTabsRev = atom(0)
+
+function recordGroupMainTab(group, close) {
+  groupChatMainTabs.set(group, close)
+  $groupMainTabsRev.set($groupMainTabsRev.get() + 1)
+}
+
+function dropGroupMainTab(group) {
+  if (groupChatMainTabs.delete(group)) {
+    $groupMainTabsRev.set($groupMainTabsRev.get() + 1)
+  }
+}
+
+/** The in-panel room is the FALLBACK surface, not a second copy: it renders
+ *  only while no main-window tab owns the group. On desktops with the door
+ *  the room already lives in a main tab, and painting it here too produced
+ *  two live panes with independent drafts driving one shared engine (#89788).
+ *  The selection atom stays set either way so the roster row still
+ *  highlights. Callers must subscribe to `$groupMainTabsRev` (BotsPane does)
+ *  so ownership changes re-run this gate. */
+function shouldRenderGroupChatInPane(group) {
+  return Boolean(group && !groupChatMainTabs.has(group))
+}
+
 function closeGroupChatMainTab(group) {
   const close = groupChatMainTabs.get(group)
 
-  groupChatMainTabs.delete(group)
+  dropGroupMainTab(group)
 
   if ($groupChatWorkspace.get() === group) {
     $groupChatWorkspace.set(null)
@@ -9353,23 +10666,39 @@ function closeGroupChatMainTab(group) {
 
 /** Main-window wrapper: seats the member roster reactively (live roster +
  *  bot meta + the room's stored cross-connection descriptors) so the room
- *  keeps working as members change while the tab is open. */
+ *  keeps working as members change while the tab is open. Also subscribes to
+ *  this pane's visibility (feature-detected host.paneVisibility): retained
+ *  panes stay mounted while hidden, so the workspace needs the hidden →
+ *  visible edge to re-anchor its log to the bottom (#89835 follow-up). */
 function GroupChatMainView({ group }) {
   const allMeta = useValue($botMeta)
   // Subscribe: membership changes ride bot meta AND the room record.
   useValue($groupChats)
   const roster = useValue($lastRoster)
   const members = groupChatMemberBots(group, roster, allMeta)
+  // Older SDKs have no paneVisibility: fall back to an always-visible atom so
+  // the hook order stays stable and behavior matches the previous build.
+  const $visible = useMemo(
+    () => (typeof host.paneVisibility === 'function' ? host.paneVisibility(`plugin-workspace:${ID}:group:${slugify(group)}`) : atom(true)),
+    [group]
+  )
+  const visible = useValue($visible)
 
-  return jsx(GroupChatWorkspace, { group, members, onBack: () => closeGroupChatMainTab(group) })
+  return jsx(GroupChatWorkspace, { group, members, visible, onBack: () => closeGroupChatMainTab(group) })
 }
 
 /** Open a group chat the Discord way: a tab taking over the MAIN chat window
  *  (host.openWorkspace, newer desktops), falling back to the in-panel room
- *  view on desktops whose SDK predates the main-area door. */
+ *  view on desktops whose SDK predates the main-area door.
+ *
+ *  Ordering matters (#89788 follow-up): the main tab must be RECORDED before
+ *  the selection atom is set. Setting the atom first opened a window where
+ *  BotsPane rendered with a selected group and an empty tab map — the
+ *  in-pane fallback painted alongside the main tab, and because the map
+ *  write itself repaints nothing, the duplicate stuck until an unrelated
+ *  re-render. */
 function openGroupChat(group) {
   $groupNeedsYou.set({ ...$groupNeedsYou.get(), [group]: false })
-  $groupChatWorkspace.set(group)
 
   if (typeof host.openWorkspace === 'function') {
     try {
@@ -9378,7 +10707,7 @@ function openGroupChat(group) {
         minWidth: '24rem',
         render: () => jsx(GroupChatMainView, { group }),
         onClose: () => {
-          groupChatMainTabs.delete(group)
+          dropGroupMainTab(group)
 
           if ($groupChatWorkspace.get() === group) {
             $groupChatWorkspace.set(null)
@@ -9386,7 +10715,10 @@ function openGroupChat(group) {
         }
       })
 
-      groupChatMainTabs.set(group, close)
+      recordGroupMainTab(group, close)
+      // Tab ownership is on record — the atom now only drives the roster
+      // highlight; shouldRenderGroupChatInPane stays false throughout.
+      $groupChatWorkspace.set(group)
 
       return
     } catch {
@@ -9394,8 +10726,9 @@ function openGroupChat(group) {
     }
   }
 
-  // The selected-group atom was set before trying the main-window door, so
-  // older desktops naturally render the in-panel room as the fallback.
+  // No main-window door (older desktop) or it threw: select the group so
+  // the in-panel room renders as the fallback surface.
+  $groupChatWorkspace.set(group)
 }
 
 /** One group chat as ONE roster row — the Discord shape: stacked member
@@ -9403,7 +10736,7 @@ function openGroupChat(group) {
  *  (markdown flattened), relative time of the last activity, and the
  *  needs-you badge on the row itself. Sorts into the same recency ordering
  *  as bot rows; clicking opens the room in the main chat window. */
-function GroupRow({ active, group, members, needsYou, onOpen }) {
+function GroupRow({ active, group, members, needsYou, onOpen, onDisband }) {
   const rooms = useValue($groupChats)
   const allMeta = useValue($botMeta)
   const room = rooms[group] || { log: [] }
@@ -9419,7 +10752,7 @@ function GroupRow({ active, group, members, needsYou, onOpen }) {
     : 'No messages yet — say hi to the room'
   const faces = members.slice(0, 3)
 
-  return jsxs('button', {
+  const row = jsxs('button', {
     type: 'button',
     onClick: () => {
       haptic('tap')
@@ -9508,6 +10841,26 @@ function GroupRow({ active, group, members, needsYou, onOpen }) {
       })
     ]
   })
+
+  return jsxs(ContextMenu, {
+    children: [
+      jsx(ContextMenuTrigger, { asChild: true, children: row }),
+      jsxs(ContextMenuContent, {
+        children: [
+          jsx(ContextMenuItem, {
+            onSelect: () => onOpen(group),
+            children: 'Open Group Chat'
+          }),
+          jsx(ContextMenuSeparator, {}),
+          jsx(ContextMenuItem, {
+            className: 'text-destructive focus:text-destructive',
+            onSelect: () => onDisband({ name: group, members }),
+            children: 'Delete Group'
+          })
+        ]
+      })
+    ]
+  })
 }
 
 function BotsPane() {
@@ -9519,11 +10872,16 @@ function BotsPane() {
   const [groupCreateOpen, setGroupCreateOpen] = useState(false)
   const [editing, setEditing] = useState(null)
   const [deleting, setDeleting] = useState(null)
+  const [deletingGroup, setDeletingGroup] = useState(null)
   const [grouping, setGrouping] = useState(null)
   const [query, setQuery] = useState('')
   const activityToasts = useValue($activityToasts)
-  const sessionsWorkspaceName = useValue($botSessionsWorkspace)
   const groupChatName = useValue($groupChatWorkspace)
+  // Main-tab ownership is a module Map; this rev subscription makes the
+  // shouldRenderGroupChatInPane gate below reactive to tab open/close
+  // (#89788 follow-up — without it a stale render could paint the in-pane
+  // room beside a live main tab and stick).
+  useValue($groupMainTabsRev)
   const groupNeedsYou = useValue($groupNeedsYou)
   const groupRooms = useValue($groupChats)
 
@@ -9541,7 +10899,7 @@ function BotsPane() {
   // No special slot for the primary bot — it competes on recency too.
   const activityOf = bot => {
     const created = botRosterMeta(bot, allMeta)?.created || bot.ui_meta?.['hermes-bots']?.created || 0
-    const lastMsg = (bot.last_session?.last_active || 0) * 1000
+    const lastMsg = (botActivitySession(bot)?.last_active || 0) * 1000
 
     return Math.max(created, lastMsg)
   }
@@ -9605,7 +10963,7 @@ function BotsPane() {
 
   if (live) {
     $lastRoster.set(roster)
-    mergeServerMeta(activeSourceRoster)
+    mergeServerMeta(activeSourceRoster, data?.fetchedAt || 0)
     pullServerAvatars(activeSourceRoster)
     trackInboundActivity(activeSourceRoster)
     backfillMessagingProtocol(activeSourceRoster)
@@ -9614,15 +10972,10 @@ function BotsPane() {
   const staleNotice = error && !live && roster.length
     ? 'Roster refresh failed — showing the last good list.' + (gatewayUp ? '' : ' Waiting for the gateway to reconnect…')
     : null
-  const sessionsWorkspaceBot = roster.find(bot => bot.name === sessionsWorkspaceName)
-
-  if (sessionsWorkspaceBot) {
-    return jsx(ProfileSessionsWorkspace, { bot: sessionsWorkspaceBot })
-  }
 
   const groupChatMembers = groupChatName ? groupChatMemberBots(groupChatName, roster, allMeta) : []
 
-  if (groupChatName && groupChatMembers.length) {
+  if (shouldRenderGroupChatInPane(groupChatName) && groupChatMembers.length) {
     return jsx(GroupChatWorkspace, { group: groupChatName, members: groupChatMembers })
   }
 
@@ -9740,10 +11093,8 @@ function BotsPane() {
           }
 
           void (async () => {
-            let pinnedChat = botRosterMeta(bot, allMeta)?.chat
-
             try {
-              pinnedChat = await prepareBotSource(bot, pinnedChat)
+              await prepareBotSource(bot)
             } catch (error) {
               host.notifyError?.(error, `Could not reach ${bot.connectionLabel || 'the remote source'}`)
 
@@ -9755,11 +11106,7 @@ function BotsPane() {
             }
 
             try {
-              const id = await openBotCanonicalChat(
-                bot.name,
-                pinnedChat,
-                bot.preferred_session || bot.last_session
-              )
+              const id = await openBotCanonicalChat(bot.name)
 
               if (generation === botOpenGeneration && id) {
                 return
@@ -9857,7 +11204,8 @@ function BotsPane() {
                               group: row.name,
                               members: row.members,
                               needsYou: Boolean(groupNeedsYou[row.name]),
-                              onOpen: openGroupChat
+                              onOpen: openGroupChat,
+                              onDisband: setDeletingGroup
                             },
                             `group:${row.name}`
                           )
@@ -9932,6 +11280,23 @@ function BotsPane() {
           await refetch()
           host.notify({ kind: 'success', message: `Deleted profile ${name}` })
         }
+      }),
+      jsx(ConfirmDialog, {
+        open: Boolean(deletingGroup),
+        title: 'Delete group chat?',
+        description: deletingGroup
+          ? `This removes “${deletingGroup.name}” from its bots and clears the shared room log. The bots and their individual chats are kept.`
+          : null,
+        destructive: true,
+        confirmLabel: 'Delete Group',
+        busyLabel: 'Deleting…',
+        doneLabel: 'Deleted',
+        onClose: () => setDeletingGroup(null),
+        onConfirm: async () => {
+          if (!deletingGroup) return
+          await disbandGroupChat(deletingGroup.name, deletingGroup.members)
+          host.notify({ kind: 'success', message: `Deleted group “${deletingGroup.name}”` })
+        }
       })
     ]
   })
@@ -9945,6 +11310,7 @@ export default {
   description: 'Bot Mode — a one-chat-per-agent roster with avatars, routines, group chats, and bot-to-bot messaging. Ships with the app; disable here if unwanted.',
   register(ctx) {
     pluginCtx = ctx
+    groupChatSyncDisposed = false
     startFaceClock()
     // Disabling the plugin (or a hot reload) must actually stop the clock —
     // before this, the rAF loop + 1Hz document scan ran until app restart.
@@ -9963,14 +11329,14 @@ export default {
       area: COMPOSER_AREAS.atCompletions,
       data: {
         provide: query => {
-          const roster = queryClient.getQueryData(ROSTER_KEY)
+          const roster = cachedUnionRoster()
           const profiles = Array.isArray(roster?.profiles) ? roster.profiles : []
 
           if (!profiles.length) {
             return []
           }
 
-          const active = (host.state.profile.get() || 'default').trim() || 'default'
+          const active = focusedMentionProfile()
           const q = (query || '').toLowerCase()
           const items = []
           const live = {
@@ -9984,17 +11350,25 @@ export default {
             }
 
             const handle = botHandle(profile.name, profile)
+            const display = displayName(profile, $botMeta.get()[profile.name])
+            // Renamed bots complete on their friendly name — the tag is the
+            // renamed slug when one exists, the profile handle otherwise.
+            const tag = botMentionTag(profile)
 
-            if (q && !handle.toLowerCase().startsWith(q)) {
+            if (
+              q &&
+              !tag.toLowerCase().startsWith(q) &&
+              !handle.toLowerCase().startsWith(q) &&
+              !display.toLowerCase().startsWith(q)
+            ) {
               continue
             }
 
-            const display = displayName(profile, $botMeta.get()[profile.name])
             const source = profile.connectionLabel ? ` · ${profile.connectionLabel}` : ''
 
             items.push({
-              insert: `@${handle}`,
-              display: `@${handle}`,
+              insert: `@${tag}`,
+              display: `@${tag}`,
               meta: `Bot · ${display}${source}`
             })
           }
@@ -10054,7 +11428,7 @@ export default {
     // and always reset — a loop can't survive a window reload anyway).
     try {
       Promise.resolve(ctx.storage?.get?.('group-chats'))
-        .then(value => {
+        .then(async value => {
           if (value && typeof value === 'object' && !Array.isArray(value)) {
             const rooms = {}
 
@@ -10068,7 +11442,9 @@ export default {
                   sessions: room.sessions && typeof room.sessions === 'object' ? room.sessions : {},
                   stranded: room.stranded && typeof room.stranded === 'object' ? room.stranded : {},
                   members: Array.isArray(room.members) ? room.members : [],
+                  roomId: typeof room.roomId === 'string' && room.roomId ? room.roomId : null,
                   image: typeof room.image === 'string' && room.image ? room.image : null,
+                  syncRevision: Math.max(0, Number(room.syncRevision || 0)),
                   epoch: 0,
                   running: false
                 }
@@ -10077,6 +11453,12 @@ export default {
 
             $groupChats.set({ ...rooms, ...$groupChats.get() })
           }
+
+          // Receive before publish. A fresh Desktop with no local room cache
+          // must hydrate the gateway projection instead of merely avoiding an
+          // empty overwrite and then rendering an empty conversation.
+          await pullGroupChatServerState().catch(() => false)
+          scheduleGroupChatServerSync($groupChats.get())
         })
         .catch(() => undefined)
     } catch {
@@ -10096,6 +11478,7 @@ export default {
 
     if (typeof ctx.onDispose === 'function') {
       ctx.onDispose(() => {
+        stopGroupChatServerSync()
         if (typeof unbindProfileListener === 'function') {
           unbindProfileListener()
         }
@@ -10150,7 +11533,7 @@ export default {
       // sessions pane collapses alone without this flag. The zone then keeps
       // a stranded BOTS tab on screen. The narrow edge overlay mirrors the
       // zone's tab strip, so the pane stays reachable while collapsed.
-      data: { placement: 'left', width: '260px', collapsible: true, showCloseButton: false, hideOnly: true, dock: { pane: 'sessions', pos: 'center', enforce: true } },
+      data: { placement: 'left', width: '260px', collapsible: true, hideOnly: true, dock: { pane: 'sessions', pos: 'center', enforce: true } },
       render: () => jsx(BotsPane, {})
     })
 
@@ -10219,10 +11602,13 @@ export default {
       }
     })
 
-    // @-mention middleware: "@<bot> do the thing" in any chat becomes an
-    // explicit handoff instruction the active agent's SOUL.md knows how to
-    // execute. Names are validated against the LIVE roster so
-    // "user@example.com" or an unknown @ passes through untouched.
+    // @-mention middleware: "@<bot> do the thing" in any chat gets an
+    // IDENTIFICATION note — who the user is referring to, resolved against
+    // the LIVE roster ("user@example.com" or an unknown @ passes through
+    // untouched). The middleware never delivers anything itself: the agent
+    // owns messaging via its message_agent tool (Bot Chats), so there is
+    // exactly one send path and user text is never forwarded verbatim by
+    // the renderer. The composer's @-autocomplete remains the picking aid.
     ctx.register({
       id: 'mention-middleware',
       area: COMPOSER_AREAS.middleware,
@@ -10240,11 +11626,17 @@ export default {
 
           if (slashNew) {
             const activeBot = $selectedBot.get()
-            const meta = activeBot ? $botMeta.get()[activeBot] : null
-            const pinnedId = meta?.chat || null
+            // Canonical identity is the profile's "Bot Chat" registry row —
+            // read it from the roster cache (canonical_session, resolved
+            // server-side by name), matching either the durable row id or
+            // the compression-lineage tip currently on screen.
+            const roster = $lastRoster.get()
+            const row = Array.isArray(roster) ? roster.find(bot => bot?.name === activeBot) : null
+            const canonical = row?.canonical_session || null
             const currentId = host.activeSessionId?.get?.() ?? null
+            const canonicalIds = [canonical?.id, canonical?.resolved_id].filter(Boolean).map(String)
 
-            if (activeBot && pinnedId && currentId && String(currentId) === String(pinnedId)) {
+            if (activeBot && currentId && canonicalIds.includes(String(currentId))) {
               host.notify({
                 kind: 'info',
                 title: 'This chat never resets',
@@ -10262,75 +11654,44 @@ export default {
           }
 
           const live = {
-            name: (host.state.profile.get() || 'default').trim() || 'default',
+            name: focusedMentionProfile(),
             connectionId: String(host.state.connectionId?.get?.() || host.activeConnectionId?.() || 'local')
           }
-          const cached = typeof queryClient !== 'undefined' && queryClient && typeof queryClient.getQueryData === 'function'
-            ? queryClient.getQueryData(ROSTER_KEY)
-            : null
+          const cached = cachedUnionRoster()
           const roster = Array.isArray(cached?.profiles) ? cached.profiles : null
           let mentionedBots = roster ? resolveRosterMentions(text, roster, live) : []
 
           if (!roster) {
-            let names = []
             try {
               const res = await host.request('profiles.list', { include_sessions: false })
-              names = (res?.profiles ?? []).map(p => p.name)
+              // Same resolver as the cached path — renamed bots (display_name
+              // / ui_meta title) stay taggable when the roster cache is cold.
+              mentionedBots = resolveRosterMentions(text, res?.profiles ?? [], live).map(bot => ({ ...bot, remoteSource: false }))
             } catch {
               return draft
             }
-
-            const prose = text.replace(/```[\s\S]*?```/g, ' ').replace(/`[^`\n]*`/g, ' ')
-            const mentioned = []
-
-            for (const match of prose.matchAll(/(^|\s)@([a-z0-9][a-z0-9_-]*)/gi)) {
-              let name = match[2].toLowerCase()
-
-              if (name === 'hermes' && !names.includes('hermes') && names.includes('default')) {
-                name = 'default'
-              }
-
-              if (names.includes(name) && name !== live.name && !mentioned.includes(name)) {
-                mentioned.push(name)
-              }
-            }
-
-            mentionedBots = mentioned.map(name => ({ name }))
           }
 
           if (!mentionedBots.length) {
             return draft
           }
 
-          const localMentions = mentionedBots.filter(bot => !bot.remoteSource)
-          const remoteMentions = mentionedBots.filter(bot => bot.remoteSource)
-
-          const activeMeta = $botMeta.get()[live.name]
-          const senderName = displayName({ name: live.name, title: activeMeta?.title }, activeMeta)
-
-          if (remoteMentions.length && typeof host.requestProfile === 'function') {
-            void deliverRemoteRosterMentions(remoteMentions, text, {
-              name: senderName,
-              handle: botHandle(live.name)
-            })
-          }
-          let note = ''
-
-          if (localMentions.length) {
-            note +=
-              '\n\n[@mention handoff — for each mentioned agent (' + localMentions.map(bot => botHandle(bot.name, bot)).join(', ') + '): ' +
-              'COMPOSE a message from you (' + senderName + ') to that agent conveying what the user wants — do not forward this text verbatim (avoid double quotes in your composed message). Send it with exactly one terminal call, run with background=true AND notify_on_complete=true (the recipient may take minutes; the user must not be blocked):\n' +
-              localMentions.map(bot => '`hermes -p ' + shellQuote(bot.name) + ' chat --in ~ -c "Bot Chat" --create-if-missing -Q -q "Message from 🤖 ' + shellDoubleQuote(senderName) + ' (@' + shellDoubleQuote(botHandle(live.name)) + '): <your composed message>"`').join('\n') +
-              '\nAfter dispatching, tell the user the message was sent and END YOUR TURN — do not wait or poll; when the background process completes, its notification carries the reply — relay it then, attributed to that agent. ' +
-              'Relay the reply back to the user, attributed to that agent.]'
-          }
-
-          if (remoteMentions.length) {
-            const labels = remoteMentions.map(bot => `@${botHandle(bot.name, bot)} (${bot.connectionLabel || bot.connectionId})`).join(', ')
-            note +=
-              '\n\n[@mention — stay on this device. Desktop is delivering to ' + labels +
-              ' over Connections in the background. Do not run hermes -p for them and do not switch Gateway. Tell the user they were messaged here; when a reply lands, relay it attributed to that agent.]'
-          }
+          // Identification only. Each line names the agent the user's tag
+          // resolves to (friendly title + device for cross-connection rows),
+          // so the agent knows exactly who "@research-buddy" is without the
+          // renderer ever acting on the user's behalf.
+          const lines = mentionedBots.map(bot => {
+            const handle = botHandle(bot.name, bot)
+            const title = String(botRosterMeta(bot, $botMeta.get())?.title || bot.ui_meta?.['hermes-bots']?.title || bot.title || '').trim()
+            const where = bot.remoteSource
+              ? ` — on ${bot.connectionLabel || bot.connectionId}`
+              : ''
+            return `@${handle} = agent profile "${bot.name}"${title ? ` ("${title}")` : ''}${where}`
+          })
+          const note =
+            '\n\n[@mentions resolved from the Bot Mode roster — the user is referring to: ' +
+            lines.join('; ') +
+            '. If they want one of these agents contacted, compose your own message and send it with your message_agent tool; never forward the user\u2019s text verbatim. If this session has no message_agent tool, agent messaging is unavailable here — say so.]'
 
           return { ...draft, text: text + note }
         }      }

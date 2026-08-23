@@ -126,6 +126,7 @@ import {
   setCurrentCwd
 } from '@/store/session'
 import { $sessionDotStateById, sessionStatusBucket } from '@/store/session-dot-state'
+import { $unconfirmedPinWrites } from '@/store/session-pin-sync'
 import { $focusedStoredSessionId, $workingSessionIds, type SplitDir } from '@/store/session-states'
 import { ackAllSessionsRead } from '@/store/session-unread'
 import { markSessionUnread } from '@/store/session-unread-remote'
@@ -257,6 +258,16 @@ const HEADER_NAV_BTN =
 // FTS results cover sessions that aren't in the loaded page; synthesize a
 // minimal SessionInfo so they render in the same row component (resume works
 // by id; the snippet stands in for the preview).
+
+// The backend's FTS layer wraps matched terms in literal '>>>' / '<<<'
+// highlight markers (sqlite snippet() delimiters — see hermes_state_search.py).
+// The sidebar renders the snippet as plain text, so the markers must be
+// stripped or a search for "foo" paints rows titled ">>>foo<<<".
+// Exported for tests.
+export function stripFtsMarkers(snippet: string): string {
+  return snippet.replaceAll('>>>', '').replaceAll('<<<', '')
+}
+
 function searchResultToSession(result: SessionSearchResult): SessionInfo {
   const ts = result.session_started ?? Date.now() / 1000
 
@@ -272,7 +283,7 @@ function searchResultToSession(result: SessionSearchResult): SessionInfo {
     message_count: 0,
     model: result.model ?? null,
     output_tokens: 0,
-    preview: result.snippet?.trim() || null,
+    preview: stripFtsMarkers(result.snippet ?? '').trim() || null,
     source: result.source ?? null,
     started_at: ts,
     title: null,
@@ -360,6 +371,7 @@ export function ChatSidebar({
   const sortOrderIds = useStore($sidebarSessionRankIds)
   const agentsGrouped = grouping === 'project'
   const pinnedSessionIds = useStore($pinnedSessionIds)
+  const unconfirmedPinWrites = useStore($unconfirmedPinWrites)
   const pinsOpen = useStore($sidebarPinsOpen)
   const agentsOpen = useStore($sidebarRecentsOpen)
   const cronOpen = useStore($sidebarCronOpen)
@@ -551,15 +563,17 @@ export function ChatSidebar({
 
   // Local pin ids first (hand-picked order), then server-flagged pins the
   // local set doesn't know about — a backend `pinned=1` row must never be
-  // invisible just because localStorage is cold or was clobbered (#85969).
+  // invisible just because localStorage is cold or was clobbered (#85969) —
+  // minus the rows whose flag our own in-flight pin write already contradicts.
   const pinnedSessions = useMemo(
     () =>
-      resolvePinnedSessions(pinnedSessionIds, sessionByAnyId, [
-        ...visibleSessions,
-        ...cronSessions,
-        ...messagingSessions
-      ]),
-    [pinnedSessionIds, sessionByAnyId, visibleSessions, cronSessions, messagingSessions]
+      resolvePinnedSessions(
+        pinnedSessionIds,
+        sessionByAnyId,
+        [...visibleSessions, ...cronSessions, ...messagingSessions],
+        unconfirmedPinWrites
+      ),
+    [pinnedSessionIds, sessionByAnyId, visibleSessions, cronSessions, messagingSessions, unconfirmedPinWrites]
   )
 
   // Every id a pin is reachable under: the raw stored ids, plus BOTH identities

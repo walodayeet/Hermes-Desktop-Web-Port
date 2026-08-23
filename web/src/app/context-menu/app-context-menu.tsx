@@ -4,7 +4,9 @@ import { useEffect } from 'react'
 import { useNavigate } from 'react-router'
 
 import { terminalMenuHandleFor } from '@/app/right-sidebar/terminal/terminal-context-menu'
+import { toggleTargetZoneTabStrip } from '@/components/pane-shell/tree/store'
 import { Codicon } from '@/components/ui/codicon'
+import { HERMES_CONTEXT_MENU_TRIGGER_ATTR } from '@/components/ui/context-menu'
 import { writeClipboardText } from '@/components/ui/copy-button'
 import {
   DropdownMenu,
@@ -565,6 +567,15 @@ function shellSections({ navigate, t }: ShellVerbs): ReactNode[][] {
         label={t.keybinds.actions['view.toggleStatusbar']}
         onSelect={toggleStatusbarVisible}
       />,
+      // The pointer-only way back to a hidden tab strip: right-clicking the
+      // shell reaches this menu from anywhere, including a zone that has no
+      // chrome left to right-click.
+      <Item
+        icon="layout-menubar"
+        key="shell-tabstrip"
+        label={t.keybinds.actions['view.toggleTabStrip']}
+        onSelect={() => void toggleTargetZoneTabStrip()}
+      />,
       <Item
         icon="settings-gear"
         key="shell-settings"
@@ -609,15 +620,11 @@ export function AppContextMenu() {
       const element = event.target instanceof Element ? event.target : null
 
       // Surfaces with their own Radix context menu keep the whole gesture.
-      // Web port (browser): right-click fixes — also match the statusbar: its
-      // footer carries its own data-slot="statusbar" (Radix asChild keeps the
-      // child's data-slot over the trigger's), so the upstream closest() check
-      // missed it and this handler stole the gesture, killing the statusbar's
-      // Radix ContextMenu.
-      if (
-        element?.closest('[data-slot="context-menu-trigger"]') ||
-        element?.closest('[data-slot="statusbar"]')
-      ) {
+      // Guard the dedicated marker first: Radix `asChild` Slot merges
+      // `mergeProps(slotProps, childProps)` so the child's `data-slot` wins
+      // (status bar footer is `data-slot="statusbar"`). The marker is stamped
+      // after `{...props}` on ContextMenuTrigger and is not overwritten.
+      if (element?.closest(`[${HERMES_CONTEXT_MENU_TRIGGER_ATTR}], [data-slot="context-menu-trigger"]`)) {
         return
       }
 
@@ -626,6 +633,10 @@ export function AppContextMenu() {
       const terminal = terminalMenuHandleFor(element)
 
       if (terminal) {
+        // Web port (browser): right-click fixes — the upstream handler never
+        // calls preventDefault (Electron's main-process context-menu event
+        // swallows the native menu). A browser tab has no main process, so
+        // without it the browser's native menu overlays ours.
         event.preventDefault()
         event.stopPropagation()
         openTerminalContextMenu(event.clientX, event.clientY, terminal)
@@ -642,8 +653,6 @@ export function AppContextMenu() {
         return
       }
 
-      // preventDefault: a browser tab has no Electron main process to swallow
-      // the native menu — without it the browser's menu overlays ours.
       event.preventDefault()
       event.stopPropagation()
       openDomContextMenu(event.clientX, event.clientY, target)

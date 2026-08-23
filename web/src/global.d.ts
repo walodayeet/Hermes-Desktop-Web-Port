@@ -96,7 +96,7 @@ declare global {
         setIgnoreMouse: (ignore: boolean) => void
         moveBy: (delta: { x: number; y: number; width: number; height: number }) => void
         setBounds: (bounds: { x: number; y: number; width: number; height: number }) => void
-        setVibrancy: (on: boolean) => Promise<{ ok: boolean }>
+        setFrost: (showing: boolean) => Promise<{ ok: boolean }>
         setSession: (sessionId: null | string) => void
         onGoto: (callback: (sessionId: string) => void) => () => void
         onChanged: (callback: (state: { open: boolean; sessionId: null | string }) => void) => () => void
@@ -151,7 +151,11 @@ declare global {
         test: (id: string) => Promise<DesktopConnectionTestResult>
         // Fan out `hermes update` to every eligible registered connection;
         // cloud entries are skipped (platform-managed), each row independent.
-        updateAll?: () => Promise<{ ok: boolean; results: DesktopConnectionUpdateResult[] }>
+        // excludeIds skips connections the caller updates through another
+        // path (the everything-update flow's active backend + local client).
+        updateAll?: (options?: {
+          excludeIds?: string[]
+        }) => Promise<{ ok: boolean; results: DesktopConnectionUpdateResult[] }>
         // Registry lifecycle push: fired when a connection is removed or
         // materially edited so the renderer can dispose (and re-dial) the
         // secondary gateways scoped to it. Optional: older Electron mains
@@ -260,6 +264,9 @@ declare global {
       openExternal: (url: string) => Promise<void>
       openPreviewInBrowser?: (url: string) => Promise<void>
       fetchLinkTitle: (url: string) => Promise<string>
+      /** A site's icon as a data URL, or '' when it has none we can read.
+       *  Resolved and cached in the main process (electron/favicon.ts). */
+      resolveFavicon?: (url: string) => Promise<string>
       sanitizeWorkspaceCwd: (cwd?: null | string) => Promise<{ cwd: string; sanitized: boolean }>
       settings: {
         getDefaultProjectDir: () => Promise<{ defaultLabel: string; dir: null | string; resolvedCwd: string }>
@@ -292,6 +299,8 @@ declare global {
       // resolved by Electron independently of the connected backend (#66899).
       // Created on demand; returns the normalized absolute path.
       desktopPluginsRoot?: () => Promise<string>
+      /** LOCAL `<HERMES_HOME>/logs` (profile-aware) — error card "Open Logs". */
+      logsRoot?: () => Promise<string>
       // Local AGENT-plugin root (<HERMES_HOME>/plugins), same Electron-local
       // resolution. The disk door also scans it for `<name>/desktop/plugin.js`
       // so one agent-plugin package can ship a desktop UI half. Optional:
@@ -993,6 +1002,8 @@ export interface DesktopCloudAgentSignInResult {
 export interface DesktopBootProgress {
   error: string | null
   fakeMode: boolean
+  /** True when the boot failure is a Nous Cloud agent that is down (HTTP 502/503/504). */
+  isCloudBackendDown?: boolean
   message: string
   phase: string
   progress: number
@@ -1004,6 +1015,8 @@ export interface DesktopBootProgress {
    */
   retryable?: boolean
   running: boolean
+  /** Structured HTTP status when the boot failure carried one (e.g. 503). */
+  statusCode?: number | null
   timestamp: number
 }
 
@@ -1306,6 +1319,8 @@ export interface HermesSelectPathsOptions {
   defaultPath?: string
   directories?: boolean
   multiple?: boolean
+  /** Backend profile that produced defaultPath; Electron uses it for WSL gating. */
+  profile?: string
   filters?: Array<{ name: string; extensions: string[] }>
 }
 
