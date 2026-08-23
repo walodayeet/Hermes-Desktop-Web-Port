@@ -894,7 +894,7 @@ patchFile(
 )
 patchFile(
   'styles.css',
-  'Web port (mobile): the empty/new-session intro floats a small card centered',
+  'Web port (mobile): anchor the empty/new-session intro to the upper portion',
   `[data-slot='aui_intro'] .fit-text > :not([aria-hidden]) > * {
   font-size: clamp(1.5rem, 9.5cqi, 2.75rem);
   white-space: nowrap;
@@ -904,17 +904,21 @@ patchFile(
   white-space: nowrap;
 }
 
-/* Web port (mobile): the empty/new-session intro floats a small card centered
-   in a ~767px thread, leaving ~318px dead above and ~261px below — the app
-   reads as "lost in space" / feels small on a phone. Below the app's collapse
-   breakpoint anchor the intro to the UPPER portion (generous top offset, no
-   empty void above the content) so the wordmark + prompt sit together and the
-   composer is clearly a reachable surface. Desktop unchanged. */
+/* Web port (mobile): anchor the empty/new-session intro to the upper portion.
+   The intro wrapper centers its card in the ~767px thread (flex
+   justify-center + pt composer-clearance), leaving ~318px dead above — the
+   app reads as "lost in space" / feels small on a phone. Below the app's
+   collapse breakpoint switch the wrapper to flex-start with a fixed ~4.5rem
+   top offset, so the wordmark + prompt sit together and the composer is
+   clearly a reachable surface. Desktop unchanged. */
 @media (max-width: 767px) {
-  [data-slot='aui_intro'] {
+  [data-slot='aui_thread-content'] > div:has([data-slot='aui_intro']) {
     justify-content: flex-start;
     padding-top: 4.5rem;
-    padding-bottom: calc(var(--composer-measured-height) + 2rem);
+  }
+  [data-slot='aui_intro'] {
+    justify-content: flex-start;
+    padding-bottom: var(--composer-measured-height);
   }
 }`,
 )
