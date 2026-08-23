@@ -473,7 +473,17 @@ export function ChatSidebar({
   const activeSidebarSessionId = currentView === 'chat' ? selectedSessionId : null
 
   const dndSensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(
+      PointerSensor,
+      {
+        // Web port (mobile): touch reorder must HOLD ~250ms before it
+        // activates, so scrolling the list doesn't start a reorder drag.
+        // Mouse reorders immediately (distance gate) as on desktop.
+        activationConstraint: window.matchMedia('(pointer: coarse)').matches
+          ? { delay: 250, tolerance: 8 }
+          : { distance: 6 }
+      }
+    ),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   )
 

@@ -1263,10 +1263,112 @@ patchFile(
   '  const sync = () => {\n    // Web port (mobile): no split-screen tiles on a narrow viewport — treat\n    // the source as empty so nothing registers, and the dispose + prune loops\n    // below evict any already-registered tile pane.\n    const tiles = $narrowViewport.get() ? [] : cfg.source.get()\n    const wanted = new Set(tiles.map(cfg.key))',
 )
 patchFile(
-  'store/session-states.ts',
-  '$narrowViewport,',
-  '  $activeTreeGroup,\n  $layoutTree,',
-  '  $activeTreeGroup,\n  $layoutTree,\n  $narrowViewport,',
+  'components/pane-shell/tree/renderer/drag-session.ts',
+  'Web port (mobile): long-press to drag',
+  `  /** Floating chip following the pointer — for drags whose source doesn't
+   *  stay visibly "held" (a sidebar row, unlike a dimmed tab). See
+   *  \`@/lib/drag-ghost\`. */
+  ghost?: { label: string }
+}`,
+  `  /** Floating chip following the pointer — for drags whose source doesn't
+   *  stay visibly "held" (a sidebar row, unlike a dimmed tab). See
+   *  \`@/lib/drag-ghost\`. */
+  ghost?: { label: string }
+  /** Web port (mobile): long-press to drag. On coarse/touch pointers the drag
+   *  must NOT engage on the first few px of movement — a scroll gesture moves
+   *  the pointer far faster than a deliberate drag, so it crossed
+   *  DRAG_THRESHOLD_PX before the browser committed to scrolling and hijacked
+   *  the gesture (rolling the session list started a drag, dropping @session
+   *  mentions / moving the chat). Require the pointer to be held this long
+   *  (ms) before a drag may engage; a real scroll either starts moving within
+   *  the window (never engages) or the browser fires pointercancel (clean
+   *  abort). Default 0 = engaged immediately (current desktop behaviour). */
+  activationDelayMs?: number
+}`,
+)
+patchFile(
+  'components/pane-shell/tree/renderer/drag-session.ts',
+  'long-press to drag — see DragSessionSpec.activationDelayMs',
+  `  const sx = e.clientX
+  const sy = e.clientY
+  const restoreCursor = document.body.style.cursor
+  const restoreSelect = document.body.style.userSelect
+  let engaged = false`,
+  `  const sx = e.clientX
+  const sy = e.clientY
+  const restoreCursor = document.body.style.cursor
+  const restoreSelect = document.body.style.userSelect
+  // Web port (mobile): long-press to drag — see DragSessionSpec.activationDelayMs.
+  const activationDelayMs = spec.activationDelayMs ?? 0
+  const coarsePointer =
+    activationDelayMs > 0 && typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches
+  const downAt = performance.now()
+  let engaged = false`,
+)
+patchFile(
+  'components/pane-shell/tree/renderer/drag-session.ts',
+  'a drag must not engage before a long-press',
+  `    if (!engaged) {
+      if (Math.hypot(x - sx, y - sy) < DRAG_THRESHOLD_PX) {
+        return
+      }
+
+      engage(x, y)
+    }`,
+  `    if (!engaged) {
+      // Web port (mobile): a drag must not engage before a long-press on
+      // touch — a scroll races past the 4px threshold first and would hijack
+      // the gesture (rolling the session list dropped @session mentions /
+      // moved the chat). Coarse pointer + delay set => require the pointer to
+      // have been held long enough. A real scroll moves within the window
+      // (never engages) or browsers fire pointercancel (clean abort).
+      if (coarsePointer && activationDelayMs > 0 && performance.now() - downAt < activationDelayMs) {
+        return
+      }
+
+      if (Math.hypot(x - sx, y - sy) < DRAG_THRESHOLD_PX) {
+        return
+      }
+
+      engage(x, y)
+    }`,
+)
+patchFile(
+  'app/chat/session-drag.ts',
+  'touch must HOLD before a session drag engages',
+  `    ghost: { label: sessionLabel(payload) },
+    onTap: opts?.onTap,
+`,
+  `    ghost: { label: sessionLabel(payload) },
+    onTap: opts?.onTap,
+    // Web port (mobile): touch must HOLD before a session drag engages — see
+    // DragSessionSpec.activationDelayMs. Without it, scrolling the session
+    // list over a row started a drag that dropped @session mentions / moved
+    // the chat. Desktop (fine pointer) engages instantly as before.
+    activationDelayMs: 300,
+`,
+)
+patchFile(
+  'app/chat/sidebar/index.tsx',
+  'touch reorder must HOLD ~250ms before it',
+  `  const dndSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  )`,
+  `  const dndSensors = useSensors(
+    useSensor(
+      PointerSensor,
+      {
+        // Web port (mobile): touch reorder must HOLD ~250ms before it
+        // activates, so scrolling the list doesn't start a reorder drag.
+        // Mouse reorders immediately (distance gate) as on desktop.
+        activationConstraint: window.matchMedia('(pointer: coarse)').matches
+          ? { delay: 250, tolerance: 8 }
+          : { distance: 6 }
+      }
+    ),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  )`,
 )
 patchFile(
   'store/session-states.ts',

@@ -125,6 +125,11 @@ export function startSessionDrag(
   startDragSession(e, {
     ghost: { label: sessionLabel(payload) },
     onTap: opts?.onTap,
+    // Web port (mobile): touch must HOLD before a session drag engages — see
+    // DragSessionSpec.activationDelayMs. Without it, scrolling the session
+    // list over a row started a drag that dropped @session mentions / moved
+    // the chat. Desktop (fine pointer) engages instantly as before.
+    activationDelayMs: 300,
 
     onEngage() {
       zones = snapshotZones()

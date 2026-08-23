@@ -183,6 +183,16 @@ export interface DragSessionSpec {
    *  stay visibly "held" (a sidebar row, unlike a dimmed tab). See
    *  `@/lib/drag-ghost`. */
   ghost?: { label: string }
+  /** Web port (mobile): long-press to drag. On coarse/touch pointers the drag
+   *  must NOT engage on the first few px of movement — a scroll gesture moves
+   *  the pointer far faster than a deliberate drag, so it crossed
+   *  DRAG_THRESHOLD_PX before the browser committed to scrolling and hijacked
+   *  the gesture (rolling the session list started a drag, dropping @session
+   *  mentions / moving the chat). Require the pointer to be held this long
+   *  (ms) before a drag may engage; a real scroll either starts moving within
+   *  the window (never engages) or the browser fires pointercancel (clean
+   *  abort). Default 0 = engaged immediately (current desktop behaviour). */
+  activationDelayMs?: number
 }
 
 /** After an ENGAGED drag, the release still synthesizes a `click` on the
@@ -226,6 +236,11 @@ export function startDragSession(e: ReactPointerEvent<HTMLElement>, spec: DragSe
   const sy = e.clientY
   const restoreCursor = document.body.style.cursor
   const restoreSelect = document.body.style.userSelect
+  // Web port (mobile): long-press to drag — see DragSessionSpec.activationDelayMs.
+  const activationDelayMs = spec.activationDelayMs ?? 0
+  const coarsePointer =
+    activationDelayMs > 0 && typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches
+  const downAt = performance.now()
   let engaged = false
   let releaseEscapeLayer: (() => void) | null = null
   let releaseGuests: (() => void) | null = null
@@ -285,6 +300,16 @@ export function startDragSession(e: ReactPointerEvent<HTMLElement>, spec: DragSe
 
   const processMove = (x: number, y: number, shift: boolean) => {
     if (!engaged) {
+      // Web port (mobile): a drag must not engage before a long-press on
+      // touch — a scroll races past the 4px threshold first and would hijack
+      // the gesture (rolling the session list dropped @session mentions /
+      // moved the chat). Coarse pointer + delay set => require the pointer to
+      // have been held long enough. A real scroll moves within the window
+      // (never engages) or browsers fire pointercancel (clean abort).
+      if (coarsePointer && activationDelayMs > 0 && performance.now() - downAt < activationDelayMs) {
+        return
+      }
+
       if (Math.hypot(x - sx, y - sy) < DRAG_THRESHOLD_PX) {
         return
       }
