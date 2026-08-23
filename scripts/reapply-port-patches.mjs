@@ -892,6 +892,32 @@ patchFile(
 .fit-text {
   --fit-captured-length: initial;`,
 )
+patchFile(
+  'styles.css',
+  'Web port (mobile): the empty/new-session intro floats a small card centered',
+  `[data-slot='aui_intro'] .fit-text > :not([aria-hidden]) > * {
+  font-size: clamp(1.5rem, 9.5cqi, 2.75rem);
+  white-space: nowrap;
+}`,
+  `[data-slot='aui_intro'] .fit-text > :not([aria-hidden]) > * {
+  font-size: clamp(1.5rem, 9.5cqi, 2.75rem);
+  white-space: nowrap;
+}
+
+/* Web port (mobile): the empty/new-session intro floats a small card centered
+   in a ~767px thread, leaving ~318px dead above and ~261px below — the app
+   reads as "lost in space" / feels small on a phone. Below the app's collapse
+   breakpoint anchor the intro to the UPPER portion (generous top offset, no
+   empty void above the content) so the wordmark + prompt sit together and the
+   composer is clearly a reachable surface. Desktop unchanged. */
+@media (max-width: 767px) {
+  [data-slot='aui_intro'] {
+    justify-content: flex-start;
+    padding-top: 4.5rem;
+    padding-bottom: calc(var(--composer-measured-height) + 2rem);
+  }
+}`,
+)
 
 // --- controller.tsx: shell titlebar strip safe-area-top -----------------------
 // The contrib shell's own 34px titlebar strip is hard-coded to y=0. In a
@@ -1378,7 +1404,7 @@ patchFile(
 )
 patchFile(
   'styles.css',
-  'Web port (mobile): sidebar nav becomes a compact icon rail',
+  '[data-nav-rail=\'true\'] {',
   `[data-slot='composer-dock'] {
   width: calc(min(var(--composer-width), calc(100% - 2rem)) + 10px);
   padding-bottom: var(--composer-shell-pad-block-end);
