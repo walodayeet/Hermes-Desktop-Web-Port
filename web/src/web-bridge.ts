@@ -770,16 +770,19 @@ export function installWebBridge(): void {
     },
 
     hud: {
+      nativeDrag: false,
       open: async () => ({ ok: false }),
       close: async () => ({ ok: false }),
       setIgnoreMouse: () => {},
       moveBy: () => {},
       setBounds: () => {},
+      resetLayout: async () => ({ ok: false }),
       setFrost: async () => ({ ok: false }),
       setSession: () => {},
       onGoto: () => () => {},
       onChanged: () => () => {},
       onCursor: () => () => {},
+      onGameOverlay: () => () => {},
     },
 
     quickEntry: {

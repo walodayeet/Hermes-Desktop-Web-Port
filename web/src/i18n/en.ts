@@ -81,6 +81,8 @@ export const en: Translations = {
       backendStopped: 'Backend stopped',
       desktopBootFailed: 'Desktop boot failed',
       gatewayConnectionLost: 'Lost connection to the gateway',
+      gatewayConnectionLostDetail:
+        'Still retrying in the background. You can keep reading and drafting — open Gateway settings if this persists.',
       gatewaySignInRequired: 'Gateway sign-in required',
       ipcBridgeUnavailable: 'Desktop IPC bridge is unavailable.'
     },
@@ -249,6 +251,7 @@ export const en: Translations = {
     openStarmap: 'Open memory graph',
     enterHud: 'HUD mode',
     exitHud: 'Exit HUD mode',
+    resetHudLayout: 'Reset HUD size and position',
     layoutEditor: 'Layout editor',
     layoutEditorTitle: mod => `Layout editor — ${mod}-click resets the layout`
   },
@@ -317,7 +320,7 @@ export const en: Translations = {
       'view.nextTerminal': 'Next terminal',
       'view.prevTerminal': 'Previous terminal',
       'view.closeTerminal': 'Close terminal',
-      'view.terminalSelection': 'Send terminal selection to composer',
+      'view.selectionToComposer': 'Send selection to composer',
       'view.terminalCopy': 'Copy terminal selection',
       'view.terminalPaste': 'Paste into terminal',
       'view.closeTab': 'Close tab',
@@ -1074,6 +1077,7 @@ export const en: Translations = {
         approval: { label: 'Approval', hint: 'Smart auto-approve' },
         mcp: { label: 'MCP', hint: 'MCP tool routing' },
         title_generation: { label: 'Title gen', hint: 'Session titles' },
+        review: { label: 'Review', hint: '/review reviewer subagent' },
         curator: { label: 'Curator', hint: 'Skill-usage review' }
       }
     },
@@ -2852,6 +2856,7 @@ export const en: Translations = {
       gateway: 'Gateway',
       gatewayReady: 'ready',
       gatewayNeedsSetup: 'needs setup',
+      gatewayUnavailable: 'inference unavailable',
       gatewayChecking: 'checking',
       gatewayConnecting: 'connecting',
       gatewayOffline: 'offline',
@@ -3067,6 +3072,7 @@ export const en: Translations = {
     closeToRight: 'Close to the right',
     closeAll: 'Close all',
     newSessionTab: 'New session tab',
+    newTab: 'New tab',
     pluginDisabled: pluginId => `Plugin "${pluginId}" disabled`,
     pluginDisabledBody: 'Re-enable it in Settings → Plugins to bring the pane back.',
     missingPane: paneId => `missing pane: ${paneId}`,

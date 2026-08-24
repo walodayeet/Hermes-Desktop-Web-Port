@@ -24,11 +24,11 @@ import { findGroup, findGroupOfPane, type LayoutNode } from '@/components/pane-s
 import {
   $activeTreeGroup,
   $layoutTree,
-  $narrowViewport,
   focusedSessionTabAnchor,
   moveTreePane,
   noteActiveTreeGroup,
-  revealTreePane
+  revealTreePane,
+  $narrowViewport
 } from '@/components/pane-shell/tree/store'
 import type { WorkspaceMode } from '@/contrib/types'
 import { stableArray } from '@/lib/stable-array'
@@ -43,13 +43,14 @@ import {
   $selectedStoredSessionId,
   $sessions,
   clearReadBaseline,
+  knownSessionProfile,
   lineageAliases,
   markSessionRead,
   sessionMatchesStoredId,
   setActiveSessionStoredIdRotation,
   setSessions
 } from './session'
-import type { SessionProfileRoute } from './session-request-router'
+import { requestForSessionProfile, type SessionOwnerScope, type SessionProfileRoute } from './session-request-router'
 import { ackStoredSessionId, markSessionUnreadFinished } from './session-unread'
 import { isSecondaryWindow } from './windows'
 
@@ -739,6 +740,73 @@ export function sessionTileOwnerRoute(storedSessionId: string): SessionProfileRo
   return $sessionTiles.get().find(tile => tile.storedSessionId === storedSessionId)?.ownerRoute
 }
 
+/**
+ * Sync owner resolution for a session id that may be a RUNTIME or a STORED id.
+ * Tile route first (exact connectionId+profile, survives relaunch), then the
+ * known session profile (row or open-time hint). Returns undefined when no
+ * owner is known — the caller falls back to ambient, never to "active".
+ */
+export function knownOwnerForSession(sessionId: null | string | undefined): SessionOwnerScope {
+  if (!sessionId) {
+    return undefined
+  }
+
+  const storedSessionId = storedSessionIdForRuntimeId(sessionId) ?? sessionId
+
+  return sessionTileOwnerRoute(storedSessionId) ?? knownSessionProfile($sessions.get(), storedSessionId)
+}
+
+/**
+ * Dispatch a session-scoped RPC through the OWNER of `sessionId` (tile route →
+ * known profile), falling back to the ambient dispatcher only when no owner is
+ * known. This is the client half of #91684: approval.respond (and siblings)
+ * sent on the ambient socket land on whatever backend is active, which for a
+ * cross-profile session is a backend that never held the approval.
+ */
+export function requestForOwnedSession<T>(
+  sessionId: null | string | undefined,
+  ambientRequest: <R>(
+    method: string,
+    params?: Record<string, unknown>,
+    timeoutMs?: number,
+    signal?: AbortSignal
+  ) => Promise<R>,
+  method: string,
+  params: Record<string, unknown> = {},
+  timeoutMs?: number,
+  signal?: AbortSignal
+): Promise<T> {
+  return requestForSessionProfile<T>(knownOwnerForSession(sessionId), ambientRequest, method, params, timeoutMs, signal)
+}
+
+/** Resolve a session id THAT MAY BE A RUNTIME ID to the stored id its tile
+ *  keys on. Session-scoped RPC params carry the runtime id, while tile owner
+ *  routes (and everything else durable) key on the stored id — so routing an
+ *  RPC by its own target session needs this translation first (#93080 /
+ *  Bot Mode misroute). Ids that match a tile's stored id pass through, so
+ *  callers can hand in either identity. Unknown ids return null: the caller
+ *  falls back to its ambient routing rather than guessing. */
+export function storedSessionIdForRuntimeId(sessionId: string): null | string {
+  const tiles = $sessionTiles.get()
+
+  // Stored-id claims are authoritative (durable identity): check them all
+  // before any runtime binding, so a stale tile whose dead runtimeId collides
+  // with a live tile's stored id cannot hijack the lookup.
+  for (const tile of tiles) {
+    if (tile.storedSessionId === sessionId) {
+      return tile.storedSessionId
+    }
+  }
+
+  for (const tile of tiles) {
+    if (tile.runtimeId && tile.runtimeId === sessionId) {
+      return tile.storedSessionId
+    }
+  }
+
+  return null
+}
+
 export function setSessionTileWorkspaceScope(storedSessionId: string, scope: SessionTileWorkspaceScope): boolean {
   const tile = $sessionTiles.get().find(candidate => candidate.storedSessionId === storedSessionId)
   const workspaceOwnerKey = scope.workspaceMode === 'bots' ? scope.workspaceOwnerKey : undefined
@@ -773,12 +841,64 @@ export function setSessionTileWorkspaceScope(storedSessionId: string, scope: Ses
  *  tile atoms left `resumeTile`'s warm path free to re-bind the same dead
  *  runtime id from the cache, so post-wake tiles repainted empty and never
  *  actually re-resumed. */
-export function resetTileRuntimeBindings() {
+export interface RuntimeReconnectScope {
+  connectionId: string
+  profile?: null | string
+}
+
+/** Fallback scope for a restarted connection whose registry identity is
+ *  unknown (a legacy remote primary with no connectionId). We cannot name the
+ *  dead owner, so instead preserve only Bot runtimes whose owner is provably
+ *  alive elsewhere; every other binding is dropped and re-resumes. A reset
+ *  only costs a re-resume, so unknown owners fail toward recovery. */
+export interface UnknownRuntimeReconnectScope {
+  liveConnectionIds: ReadonlySet<string>
+}
+
+export function resetTileRuntimeBindings(
+  reconnectedScope?: null | string | RuntimeReconnectScope | UnknownRuntimeReconnectScope
+) {
   const tiles = $sessionTiles.get()
+
+  const liveConnectionIds =
+    reconnectedScope && typeof reconnectedScope === 'object' && 'liveConnectionIds' in reconnectedScope
+      ? reconnectedScope.liveConnectionIds
+      : null
+
+  const reconnected =
+    typeof reconnectedScope === 'string'
+      ? { connectionId: reconnectedScope.trim(), profile: null }
+      : reconnectedScope && !liveConnectionIds
+        ? {
+            connectionId: (reconnectedScope as RuntimeReconnectScope).connectionId.trim(),
+            profile: (reconnectedScope as RuntimeReconnectScope).profile?.trim() || null
+          }
+        : null
+
+  const belongsToReconnectedRuntime = (tile: SessionTile): boolean => {
+    const route = tile.ownerRoute
+
+    if (liveConnectionIds) {
+      // Unknown restarted identity: a tile survives only when its owner is a
+      // connection we know is still live — anything else rebinds on resume.
+      return !route?.connectionId || !liveConnectionIds.has(route.connectionId)
+    }
+
+    if (!reconnected?.connectionId || route?.connectionId !== reconnected.connectionId) {
+      return false
+    }
+
+    return !reconnected.profile || (route.targetProfile || route.profile) === reconnected.profile
+  }
 
   const preservedStoredIds = new Set(
     tiles
-      .filter(tile => tile.workspaceMode === 'bots' && Boolean(tile.ownerRoute?.connectionId))
+      .filter(
+        tile =>
+          tile.workspaceMode === 'bots' &&
+          Boolean(tile.ownerRoute?.connectionId) &&
+          (!(reconnected || liveConnectionIds) || !belongsToReconnectedRuntime(tile))
+      )
       .map(tile => tile.storedSessionId)
   )
 

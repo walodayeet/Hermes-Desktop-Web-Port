@@ -2,6 +2,7 @@ import { useStore } from '@nanostores/react'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 import type { NavigateFunction } from 'react-router'
 
+import { NO_PROJECT_ID } from '@/app/chat/sidebar/projects/workspace-groups'
 import { graftRefreshedTailOntoBackfill } from '@/app/chat/transcript-backfill'
 import { $narrowViewport, revealTreePane } from '@/components/pane-shell/tree/store'
 import { setWorkspaceScope } from '@/components/pane-shell/workspace-scope'
@@ -30,6 +31,7 @@ import {
   normalizeProfileKey
 } from '@/store/profile'
 import {
+  $projectScope,
   beginSessionMutation,
   endSessionMutation,
   resolveNewSessionCwd,
@@ -99,6 +101,7 @@ import type { SessionCreateResponse, SessionMessage, SessionResumeResponse, Usag
 import { navigateToWorkspacePage, NEW_CHAT_ROUTE, sessionRoute, SETTINGS_ROUTE } from '../../../routes'
 import type { ClientSessionState, SidebarNavItem } from '../../../types'
 import { sessionContextDrift } from '../session-context-drift'
+import { singleFlightSessionResume } from '../use-prompt-actions/single-flight-resume'
 
 import {
   appendLiveSessionProjection,
@@ -469,10 +472,13 @@ export function useSessionActions({
         // An explicit one-shot workspace target (null → detached, string → that
         // folder) wins; otherwise the live cwd, then the project-aware default
         // (resolveNewSessionCwd — a project's new session keeps its repo cwd).
+        // Home is an explicit detached scope: do not let a stale live cwd from
+        // the previously selected project leak into this new session (#84220).
         const workspaceTarget = $newChatWorkspaceTarget.get()
+        const homeScope = $projectScope.get() === NO_PROJECT_ID
 
         const cwd =
-          workspaceTarget === null
+          workspaceTarget === null || (workspaceTarget === undefined && homeScope)
             ? ''
             : typeof workspaceTarget === 'string'
               ? workspaceTarget.trim()
@@ -611,16 +617,24 @@ export function useSessionActions({
 
       try {
         // Fresh tile → the caller's workspace when one was named (the sidebar
-        // "+" on a project/worktree lane), else the resolved new-session cwd
-        // (project scope → configured default).
+        // "+" on a project/worktree lane), explicit null means Home/detached,
+        // else the resolved new-session cwd (project scope → configured default).
+        // `options?.cwd || resolve…` is wrong for Home: null is falsy and used
+        // to fall through into the last project folder while main chat was
+        // occupied (openTab path for "New session in Home").
         const capturedRoute = options?.route === undefined ? $newChatRoute.get() : options.route
         const workspaceScope = options?.workspaceScope ?? { workspaceMode: 'sessions' }
+        const cwd =
+          options?.cwd === null
+            ? ''
+            : typeof options?.cwd === 'string'
+              ? options.cwd.trim()
+              : resolveNewSessionCwd()
 
         const params = {
-          ...(await desktopSessionCreateParams((options?.cwd || resolveNewSessionCwd()).trim(), capturedRoute)),
+          ...(await desktopSessionCreateParams(cwd, capturedRoute)),
           ...(workspaceScope.workspaceMode === 'bots' ? { hidden: true } : {})
         }
-
         const created = capturedRoute
           ? await requestGatewayForAgent<SessionCreateResponse>(
               capturedRoute.connectionId,
@@ -1196,21 +1210,23 @@ export function useSessionActions({
 
         let resumeRuntimeBaselineMessages: ChatMessage[] = []
 
-        const resumePromise = requestForSession<SessionResumeResponse>('session.resume', {
-          session_id: storedSessionId,
-          cols: 96,
-          source: 'desktop',
-          defer_history: !watchWindow,
-          // REST is the transcript authority for Desktop. Avoid duplicating a
-          // potentially huge compression lineage in the WebSocket response.
-          // Watch windows attach lazily (live mirror). Every other cold resume
-          // gets the gateway's default deferred build: the RPC returns the
-          // transcript immediately instead of blocking the switch on _make_agent
-          // (MCP discovery / prompt build), and the agent pre-warms in the
-          // background while the prefetch above paints the transcript.
-          ...(watchWindow ? { lazy: true } : { omit_messages: true }),
-          ...(sessionProfile ? { profile: sessionProfile } : {})
-        }).then(resumed => {
+        const resumePromise = singleFlightSessionResume(storedSessionId, () =>
+          requestForSession<SessionResumeResponse>('session.resume', {
+            session_id: storedSessionId,
+            cols: 96,
+            source: 'desktop',
+            defer_history: !watchWindow,
+            // REST is the transcript authority for Desktop. Avoid duplicating a
+            // potentially huge compression lineage in the WebSocket response.
+            // Watch windows attach lazily (live mirror). Every other cold resume
+            // gets the gateway's default deferred build: the RPC returns the
+            // transcript immediately instead of blocking the switch on _make_agent
+            // (MCP discovery / prompt build), and the agent pre-warms in the
+            // background while the prefetch above paints the transcript.
+            ...(watchWindow ? { lazy: true } : { omit_messages: true }),
+            ...(sessionProfile ? { profile: sessionProfile } : {})
+          })
+        ).then(resumed => {
           resumeRuntimeBaselineMessages =
             sessionStateByRuntimeIdRef.current.get(resumed.session_id)?.messages ?? resumeRuntimeBaselineMessages
 
@@ -1646,8 +1662,6 @@ export function useSessionActions({
           routedSessionId
         )
 
-        // The branch opens as its own tile in the parent's worktree, not as the
-        // primary session — keep its runtime out of the main composer atoms.
         const runtimeInfo = applyRuntimeInfo(branched.info, { foreground: false })
         patchSessionWorkspace(routedSessionId, runtimeInfo?.cwd)
 
@@ -1655,13 +1669,20 @@ export function useSessionActions({
           updateSessionState(branched.session_id, state => ({ ...state, ...runtimeInfo }), routedSessionId)
         }
 
-        // Open the branch as its own tab and switch to it, leaving the parent
-        // chat exactly where it is. Prime the tile with the create runtime so it
-        // skips a redundant resume. Do NOT select it as the primary session
-        // first — openSessionTile no-ops when the id is already primary.
-        openSessionTile(routedSessionId, 'center')
-        patchSessionTile(routedSessionId, { runtimeId: branched.session_id })
-        revealTreePane(`session-tile:${routedSessionId}`)
+        // Only take over the main pane when the chat being branched is the one
+        // already open there — branching a background/sidebar session must
+        // not yank the user's current view away from what they're looking at
+        // (the #69750 focus-stealing bug, reintroduced if this fires
+        // unconditionally). resumeSession reuses the runtime warm-cached above
+        // (ensureSessionState/updateSessionState) instead of an extra resume RPC.
+        if (parentStoredId !== null && selectedStoredSessionIdRef.current === parentStoredId) {
+          await resumeSession(routedSessionId)
+        } else {
+          openSessionTile(routedSessionId, 'center')
+          patchSessionTile(routedSessionId, { runtimeId: branched.session_id })
+          revealTreePane(`session-tile:${routedSessionId}`)
+        }
+
         broadcastSessionsChanged()
 
         return true
@@ -1675,7 +1696,15 @@ export function useSessionActions({
         }, 0)
       }
     },
-    [copy, creatingSessionRef, ensureSessionState, requestGateway, updateSessionState]
+    [
+      copy,
+      creatingSessionRef,
+      ensureSessionState,
+      requestGateway,
+      resumeSession,
+      selectedStoredSessionIdRef,
+      updateSessionState
+    ]
   )
 
   // Branch the open chat — optionally from a specific message — off its live transcript.

@@ -81,6 +81,8 @@ export const ja = defineLocale({
       backendStopped: 'バックエンドが停止しました',
       desktopBootFailed: 'デスクトップの起動に失敗しました',
       gatewayConnectionLost: 'ゲートウェイへの接続が切断されました',
+      gatewayConnectionLostDetail:
+        'Still retrying in the background. You can keep reading and drafting — open Gateway settings if this persists.',
       gatewaySignInRequired: 'ゲートウェイへのサインインが必要です',
       ipcBridgeUnavailable: 'デスクトップ IPC ブリッジが利用できません。'
     },
@@ -247,7 +249,8 @@ export const ja = defineLocale({
     muteHaptics: '触覚フィードバックをオフ',
     unmuteHaptics: '触覚フィードバックをオン',
     openSettings: '設定を開く',
-    openStarmap: 'メモリグラフを開く'
+    openStarmap: 'メモリグラフを開く',
+    resetHudLayout: 'HUD のサイズと位置をリセット'
   },
 
   language: {
@@ -996,6 +999,7 @@ export const ja = defineLocale({
         approval: { label: '承認', hint: 'スマート自動承認' },
         mcp: { label: 'MCP', hint: 'MCP ツールルーティング' },
         title_generation: { label: 'タイトル生成', hint: 'セッションタイトル' },
+        review: { label: 'レビュー', hint: '/review レビューサブエージェント' },
         curator: { label: 'キュレーター', hint: 'スキル使用レビュー' }
       }
     },
@@ -2520,6 +2524,7 @@ export const ja = defineLocale({
       gateway: 'ゲートウェイ',
       gatewayReady: '準備完了',
       gatewayNeedsSetup: '設定が必要',
+      gatewayUnavailable: '推論を利用できません',
       gatewayChecking: '確認中',
       gatewayConnecting: '接続中',
       gatewayOffline: 'オフライン',
@@ -2719,6 +2724,7 @@ export const ja = defineLocale({
     closeToRight: '右側を閉じる',
     closeAll: 'すべて閉じる',
     newSessionTab: '新しいセッションタブ',
+    newTab: '新しいタブ',
     pluginDisabled: pluginId => `プラグイン「${pluginId}」を無効化しました`,
     pluginDisabledBody: '設定 → プラグイン で再有効化するとペインが戻ります。',
     missingPane: paneId => `ペインが見つかりません: ${paneId}`,

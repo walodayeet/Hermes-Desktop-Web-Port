@@ -1447,6 +1447,12 @@ patchFile(
   '  // Web port (mobile): single-surface — a narrow viewport has no room for a\n  // split tile; opening a session here instead surfaces in main (the callers\n  // with a navigate handle route it in-place, not as a tile).\n  if ($narrowViewport.get()) {\n    return\n  }\n\n  const tiles = $sessionTiles.get()\n\n  // Opening a session in a tab/tile is "reading" it',
 )
 patchFile(
+  'store/session-states.ts',
+  "  $narrowViewport\n} from '@/components/pane-shell/tree/store'",
+  "  noteActiveTreeGroup,\n  revealTreePane\n} from '@/components/pane-shell/tree/store'",
+  "  noteActiveTreeGroup,\n  revealTreePane,\n  $narrowViewport\n} from '@/components/pane-shell/tree/store'",
+)
+patchFile(
   'app/session/hooks/use-session-actions/index.ts',
   '$narrowViewport, revealTreePane',
   "import { revealTreePane } from '@/components/pane-shell/tree/store'",

@@ -96,6 +96,8 @@ export const ar = defineLocale({
       backendStopped: 'توقف الخلفية',
       desktopBootFailed: 'فشل تشغيل سطح المكتب',
       gatewayConnectionLost: 'انقطع الاتصال بالبوابة',
+      gatewayConnectionLostDetail:
+        'Still retrying in the background. You can keep reading and drafting — open Gateway settings if this persists.',
       gatewaySignInRequired: 'تسجيل الدخول للبوابة مطلوب',
       ipcBridgeUnavailable: 'جسر IPC لسطح المكتب غير متاح.'
     },
@@ -216,6 +218,7 @@ export const ar = defineLocale({
     openStarmap: 'فتح خريطة الذاكرة',
     enterHud: 'وضع HUD',
     exitHud: 'إنهاء وضع HUD',
+    resetHudLayout: 'إعادة تعيين حجم HUD وموضعه',
     layoutEditor: 'محرر التخطيط',
     layoutEditorTitle: modifier => `محرر التخطيط — انقر مع ${modifier} لإعادة ضبط التخطيط`
   },
@@ -276,7 +279,7 @@ export const ar = defineLocale({
       'view.showTerminal': 'إظهار الطرفية',
       'view.closeTab': 'إغلاق علامة التبويب',
       'view.reopenTab': 'إعادة فتح علامة التبويب المغلقة',
-      'view.terminalSelection': 'إرسال تحديد الطرفية إلى المحرّر',
+      'view.selectionToComposer': 'إرسال التحديد إلى المحرّر',
       'view.terminalCopy': 'نسخ تحديد الطرفية',
       'view.terminalPaste': 'لصق في الطرفية',
       'view.closePreviewTab': 'إغلاق علامة تبويب المعاينة',
@@ -884,6 +887,10 @@ export const ar = defineLocale({
         title_generation: {
           label: 'توليد العناوين',
           hint: 'عناوين الجلسات'
+        },
+        review: {
+          label: 'المراجعة',
+          hint: 'وكيل المراجعة الفرعي /review'
         },
         curator: {
           label: 'المنسّق',
@@ -2249,6 +2256,7 @@ export const ar = defineLocale({
       gateway: 'البوابة',
       gatewayReady: 'البوابة جاهزة',
       gatewayNeedsSetup: 'البوابة تحتاج إعدادا',
+      gatewayUnavailable: 'الاستدلال غير متاح',
       gatewayChecking: 'جار فحص البوابة',
       gatewayConnecting: 'جار اتصال البوابة',
       gatewayOffline: 'البوابة غير متصلة',
