@@ -1461,8 +1461,8 @@ patchFile(
 patchFile(
   'app/session/hooks/use-session-actions/index.ts',
   'Web port (mobile): no split on narrow',
-  '    async (dir: TileDock = \'right\', options?: { cwd?: null | string; listed?: boolean }) => {\n      const listed = options?.listed ?? true',
-  '    async (dir: TileDock = \'right\', options?: { cwd?: null | string; listed?: boolean }) => {\n      // Web port (mobile): no split on narrow — a "new tab" request reuses the\n      // single workspace as a fresh draft instead of stacking a tile.\n      if ($narrowViewport.get()) {\n        startFreshSessionDraft()\n\n        return\n      }\n\n      const listed = options?.listed ?? true',
+  '      const listed = options?.listed ?? true\n\n      try {',
+  '      // Web port (mobile): no split on narrow — a "new tab" request reuses the\n      // single workspace as a fresh draft instead of stacking a tile.\n      if ($narrowViewport.get()) {\n        startFreshSessionDraft()\n\n        return\n      }\n\n      const listed = options?.listed ?? true\n\n      try {',
 )
 
 if (touched === 0) {

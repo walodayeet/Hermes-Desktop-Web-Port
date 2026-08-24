@@ -613,6 +613,14 @@ export function useSessionActions({
         workspaceScope?: SessionTileWorkspaceScope
       }
     ) => {
+      // Web port (mobile): no split on narrow — a "new tab" request reuses the
+      // single workspace as a fresh draft instead of stacking a tile.
+      if ($narrowViewport.get()) {
+        startFreshSessionDraft()
+
+        return
+      }
+
       const listed = options?.listed ?? true
 
       try {
