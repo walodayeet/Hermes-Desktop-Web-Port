@@ -1170,38 +1170,71 @@ patchFile(
 // back, and the pin resurrects "hours later / after switching devices".
 // Guard: when the resolved row already reports pinned=false, skip the replay
 // and let the pull pass below drop the stale local pin instead.
+//
+// 2026-08-25: the guard must only fire inside the BOOT replay window. Applied
+// naively it also swallowed LIVE user pins — clicking pin on a session whose
+// row still says pinned=false (the PATCH hasn't round-tripped yet) hit the
+// guard, the PATCH was never sent, and the pull pass un-pinned it right back
+// (localStorage showed pinned, server never learned → pin "doesn't work").
+// Gated on bootReconcilePassed: boot replay is blocked, live clicks flow.
+// The flag is declared + closed by the two subsequent patches.
 patchFile(
   'store/session-pin-sync.ts',
-  'Web port (mobile): never re-assert a server-unpinned pin',
-  `  for (const id of [...pending]) {
-    const row = $sessions.get().find(entry => sessionMatchesStoredId(entry, id))
-
-    if (!row) {
-      continue
-    }
-
-    pending.delete(id)
-    mirrored.add(id)
-    void writePin(id, true, row.profile).catch(() => {`,
-  `  for (const id of [...pending]) {
-    const row = $sessions.get().find(entry => sessionMatchesStoredId(entry, id))
-
-    if (!row) {
-      continue
-    }
-
-    pending.delete(id)
-    mirrored.add(id)
-
-    // Web port (mobile): never re-assert a pin the server already reports
+  'row.pinned === false && !bootReconcilePassed',
+  `    // Web port (mobile): never re-assert a pin the server already reports
     // unpinned — a stale boot / another device would flip it back and the
     // pin resurrects hours later or after switching devices. The pull pass
     // below drops the stale local copy instead.
     if (row.pinned === false) {
       continue
-    }
+    }`,
+  `    // Web port (mobile): never re-assert a pin the server already reports
+    // unpinned — a stale boot / another device would flip it back and the
+    // pin resurrects hours later or after switching devices. The pull pass
+    // below drops the stale local copy instead.
+    //
+    // The guard only fires inside the BOOT replay window (before the first
+    // server-backed session list arrives). A live user pin on a row the
+    // server still reports pinned=false MUST reach writePin — skipping it
+    // silently drops the fresh pin (localStorage shows it, the server never
+    // learns, and the pull pass un-pins it right back). Fixed while
+    // re-anchoring for the 2026-08-25 upstream sync.
+    if (row.pinned === false && !bootReconcilePassed) {
+      continue
+    }`,
+)
+// Boot-replay window flag: the never-reassert guard applies ONLY until the
+// first server-backed session list has been reconciled. After that, live
+// user pins must flow through writePin even though rows still report the
+// pre-PATCH pinned=false.
+patchFile(
+  'store/session-pin-sync.ts',
+  'let bootReconcilePassed = false',
+  `let reconciling = false`,
+  `let reconciling = false
 
-    void writePin(id, true, row.profile).catch(() => {`,
+// Web port (mobile): boot-replay window for the never-reassert guard above.
+// True once the first server-backed session list has been reconciled — after
+// that, live pins must always reach writePin even when rows still report the
+// pre-PATCH pinned=false (the guard would otherwise swallow fresh pin clicks).
+let bootReconcilePassed = false`,
+)
+// Close the boot-replay window once the first reconcile actually pulled a
+// server-backed session list (reconcile is also called on every $sessions
+// change, so the flag latches on the first real list, not the boot call).
+patchFile(
+  'store/session-pin-sync.ts',
+  'Web port (mobile): close boot replay on first server list',
+  `  pullRemotePins()
+}`,
+  `  pullRemotePins()
+
+  // Web port (mobile): close the boot-replay window once rows arrived — the
+  // never-reassert guard must not swallow live pins past boot.
+  if ($sessions.get().length > 0) {
+    bootReconcilePassed = true
+  }
+}`,
 )
 
 // --- app/context-menu/app-context-menu.tsx: web-port right-click -----------

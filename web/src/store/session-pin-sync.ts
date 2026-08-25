@@ -238,6 +238,12 @@ function pullRemotePins(): void {
 // `RangeError: Invalid array length`.
 let reconciling = false
 
+// Web port (mobile): boot-replay window for the never-reassert guard above.
+// True once the first server-backed session list has been reconciled — after
+// that, live pins must always reach writePin even when rows still report the
+// pre-PATCH pinned=false (the guard would otherwise swallow fresh pin clicks).
+let bootReconcilePassed = false
+
 function reconcile(): void {
   if (reconciling) {
     return
@@ -315,7 +321,14 @@ function reconcileInner(): void {
     // unpinned — a stale boot / another device would flip it back and the
     // pin resurrects hours later or after switching devices. The pull pass
     // below drops the stale local copy instead.
-    if (row.pinned === false) {
+    //
+    // The guard only fires inside the BOOT replay window (before the first
+    // server-backed session list arrives). A live user pin on a row the
+    // server still reports pinned=false MUST reach writePin — skipping it
+    // silently drops the fresh pin (localStorage shows it, the server never
+    // learns, and the pull pass un-pins it right back). Fixed while
+    // re-anchoring for the 2026-08-25 upstream sync.
+    if (row.pinned === false && !bootReconcilePassed) {
       continue
     }
 
@@ -327,6 +340,12 @@ function reconcileInner(): void {
   }
 
   pullRemotePins()
+
+  // Web port (mobile): close the boot-replay window once rows arrived — the
+  // never-reassert guard must not swallow live pins past boot.
+  if ($sessions.get().length > 0) {
+    bootReconcilePassed = true
+  }
 }
 
 // Sync once, then re-sync on pin-set and session-list changes. Call once per app.
