@@ -260,15 +260,43 @@ function imageFileNameFromUrl(url: string): string {
   }
 }
 
-/** Mint a single-use WS ticket (v0.20.0 cookie auth), then build the URL. */
+/** Mint a single-use WS ticket (v0.20.0 cookie auth), then build the URL.
+ *
+ *  Web port (local gateway): when the ticket mint fails (HTTP 401/403 — the
+ *  browser's session cookie died, e.g. the backend was restarted/OOM-killed),
+ *  the previous behavior returned the stale wsUrl (shared/src/websocket-url.ts
+ *  falls back to conn.wsUrl on a failed mint), so the app looped on
+ *  "Could not connect to Hermes gateway" forever with no way back to the
+ *  login form — while the Electron app (live session, auto-reconnect) stayed
+ *  connected. Fix: redirect to the sign-in page immediately so the user can
+ *  re-authenticate. */
 async function mintWsUrl(profile?: null | string): Promise<string> {
-  const { ticket } = await fetchJson<{ ticket: string }>('/api/auth/ws-ticket', {
-    method: 'POST',
-  })
-  return buildHermesWebSocketUrl({
-    path: '/api/ws',
-    authParam: ['ticket', ticket],
-  })
+  try {
+    const { ticket } = await fetchJson<{ ticket: string }>('/api/auth/ws-ticket', {
+      method: 'POST',
+    })
+    return buildHermesWebSocketUrl({
+      path: '/api/ws',
+      authParam: ['ticket', ticket],
+    })
+  } catch (error) {
+    // Session is gone — bounce to the login page (preserve where we were so a
+    // successful login returns to the same view). Throwing here makes
+    // resolveGatewayWsUrl surface the failure instead of falling back to the
+    // stale URL, and any renderer guard that catches it shows the sign-in
+    // path rather than the opaque "could not connect".
+    try {
+      sessionStorage.setItem('hermes.lastLocation', window.location.pathname + window.location.search)
+    } catch {
+      // private mode — redirect still works
+    }
+    window.location.assign(`${API_BASE}/login`)
+    throw new Error(
+      error instanceof Error
+        ? `WebSocket ticket expired (${error.message}); redirecting to sign in`
+        : 'WebSocket ticket expired; redirecting to sign in'
+    )
+  }
 }
 
 // ── v2 multi-connection registry (remote gateways) ──────────────────────────

@@ -1464,6 +1464,41 @@ patchFile(
   '      const listed = options?.listed ?? true\n\n      try {',
   '      // Web port (mobile): no split on narrow — a "new tab" request reuses the\n      // single workspace as a fresh draft instead of stacking a tile.\n      if ($narrowViewport.get()) {\n        startFreshSessionDraft()\n\n        return\n      }\n\n      const listed = options?.listed ?? true\n\n      try {',
 )
+patchFile(
+  '../../shared/src/websocket-url.ts',
+  'Web port (local gateway): the web-bridge mint throws when the session',
+  `  if (mint) {
+    const fresh = await mint(profile).catch(() => null)
+
+    if (typeof fresh === 'string') {
+      return fresh
+    }
+
+    if (fresh?.ok) {
+      return fresh.wsUrl
+    }
+  }
+
+  return conn.wsUrl`,
+  `  if (mint) {
+    // Web port (local gateway): the web-bridge mint throws when the session
+    // cookie died (backend restart/OOM) — it redirects to /login and rejects.
+    // Do NOT swallow that into a silent stale-URL fallback (which made the app
+    // loop on "Could not connect to Hermes gateway"); propagate the failure so
+    // the reconnect loop surfaces the sign-in path instead.
+    const fresh = await mint(profile)
+
+    if (typeof fresh === 'string') {
+      return fresh
+    }
+
+    if (fresh?.ok) {
+      return fresh.wsUrl
+    }
+  }
+
+  return conn.wsUrl`,
+)
 
 if (touched === 0) {
   console.log('no patches applied (all present)')

@@ -79,7 +79,12 @@ export async function resolveGatewayWsUrl(deps: ResolveGatewayWsUrlDeps, conn: G
   }
 
   if (mint) {
-    const fresh = await mint(profile).catch(() => null)
+    // Web port (local gateway): the web-bridge mint throws when the session
+    // cookie died (backend restart/OOM) — it redirects to /login and rejects.
+    // Do NOT swallow that into a silent stale-URL fallback (which made the app
+    // loop on "Could not connect to Hermes gateway"); propagate the failure so
+    // the reconnect loop surfaces the sign-in path instead.
+    const fresh = await mint(profile)
 
     if (typeof fresh === 'string') {
       return fresh
