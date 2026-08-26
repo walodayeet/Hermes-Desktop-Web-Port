@@ -34,14 +34,14 @@ const SYNCED_KEYS: ReadonlySet<string> = new Set([
   'hermes-desktop-profile-themes-v1',
   'hermes-desktop-profile-modes-v1',
   'hermes-desktop-active-profile-v1',
-  // Plugin enable/disable decisions.
-  'hermes.desktop.pluginDecisions.v2',
-  'hermes.desktop.disabledPlugins.v1',
-  // Disk-plugin own-state (e.g. Vietnamese UI's on/off chip) — plugin scoped
-  // keys use the `hermes.plugin.<id>.` prefix via ctx.storage; legacy disk
-  // plugins that predate ctx.storage use their own bare keys. Sync them too
-  // so a toggle on one device sticks on the next.
-  'hermes.vietnamese-ui.enabled',
+  // NOTE: plugin enable/disable decisions are deliberately NOT synced. Plugin
+  // on/off is a per-device/per-cookie preference — one browser may run the
+  // Vietnamese UI, another may not — and the plugin LIST (inventory from
+  // bundled + backend disk scan) is identical on every device regardless.
+  // Syncing the decisions made a toggle on device A hide the plugin on device
+  // B (and vice versa): "I don't see some plugins on some devices".
+  // https://github.com/walodayeet/hermes-desktop-web — decisions stay in each
+  // browser's localStorage (`hermes.desktop.pluginDecisions.v2` etc.).
   // User-installed themes (incl. marketplace installs).
   'hermes-desktop-user-themes-v1',
 ])

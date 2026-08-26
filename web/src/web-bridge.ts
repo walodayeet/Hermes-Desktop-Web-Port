@@ -831,12 +831,21 @@ export function installWebBridge(): void {
     },
 
     // --- boot / system ----------------------------------------------------------
+    // Web port: the gateway WS is dialed entirely renderer-side (mint ticket →
+    // connect), so Electron main's `retryable` tag — which only ever fires for a
+    // TRANSIENT remote failure — never exists here. Without it, use-gateway-boot
+    // treats ANY connection hiccup (mint timeout, WS upgrade blip) as terminal
+    // and throws up "Hermes couldn't start" against a healthy backend. This port
+    // must keep the bounded-retry affordance: every connect failure is a
+    // candidate for the renderer's 5× backoff, and only exhausted retries land
+    // on the real recovery dialog.
     getBootProgress: async () => ({
       error: null,
       fakeMode: false,
       phase: 'renderer.ready',
       progress: 100,
       message: 'Web bridge ready',
+      retryable: true,
       running: false,
       timestamp: Date.now(),
     }),
