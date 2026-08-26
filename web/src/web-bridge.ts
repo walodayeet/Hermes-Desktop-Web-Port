@@ -784,6 +784,11 @@ export function installWebBridge(): void {
       return opened ? { ok: true } : { ok: false, error: 'popup-blocked' }
     },
     claimAmbientCue: async () => true,
+    // Popping the in-app Browser into its own OS window is Electron-only; a
+    // browser tab has no equivalent window shape, so report failure and never
+    // fire popout-close (the in-app Browser stays docked inline).
+    openBrowserWindow: async () => ({ ok: false, error: 'unsupported-in-web' }),
+    onBrowserPopoutClosed: () => () => {},
 
     petOverlay: {
       open: async () => ({ ok: false }),
@@ -950,6 +955,10 @@ export function installWebBridge(): void {
       version: null,
       error: 'unsupported-in-web',
     }),
+    // Web: no OS keychain — stored secrets live server-side with the backend,
+    // so keychain encryption is always reported off and cannot be enabled.
+    getSecretStorageEncryption: async () => ({ on: false }),
+    setSecretStorageEncryption: async () => ({ on: false }),
     // RFC 8252 native-PKCE login relayed by the proxy (the browser can't
     // listen on a loopback port). begin() kicks off the flow server-side and
     // returns the gateway authorize URL; we open it in a new tab so the user
@@ -1023,6 +1032,7 @@ export function installWebBridge(): void {
     profile: {
       get: async () => ({ profile: null }),
       set: async () => ({ profile: null }),
+      remember: async () => ({ profile: null }),
     },
 
     // --- zoom / UI scale: CSS zoom on the root, persisted to localStorage ------

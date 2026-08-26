@@ -316,22 +316,6 @@ function reconcileInner(): void {
 
     pending.delete(id)
     mirrored.add(id)
-
-    // Web port (mobile): never re-assert a pin the server already reports
-    // unpinned — a stale boot / another device would flip it back and the
-    // pin resurrects hours later or after switching devices. The pull pass
-    // below drops the stale local copy instead.
-    //
-    // The guard only fires inside the BOOT replay window (before the first
-    // server-backed session list arrives). A live user pin on a row the
-    // server still reports pinned=false MUST reach writePin — skipping it
-    // silently drops the fresh pin (localStorage shows it, the server never
-    // learns, and the pull pass un-pins it right back). Fixed while
-    // re-anchoring for the 2026-08-25 upstream sync.
-    if (row.pinned === false && !bootReconcilePassed) {
-      continue
-    }
-
     void writePin(id, true, row.profile).catch(() => {
       // Let a later reconcile retry the mirror.
       mirrored.delete(id)
