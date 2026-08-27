@@ -392,46 +392,13 @@ export function useStatusbarItems({
     copy
   ])
 
+  // Web port (mobile): statusbar trimmed to plugins/context/folder.
+  // Everything except the current-folder chip is hidden (plugins arrive via
+  // extraRightItems and the context meter survives in the right array).
+  // Re-anchored for the 2026-08-27 upstream restructure that added
+  // gateway-switcher/agents/cron/webhooks to the left array.
   const coreLeftStatusbarItems = useMemo<readonly StatusbarItem[]>(
     () => [
-      {
-        className: `w-7 justify-center px-0${commandCenterOpen ? ' bg-accent/55 text-foreground' : ''}`,
-        icon: <Command className="size-3.5" />,
-        id: 'command-center',
-        // The system icon: the way into every other surface, including the
-        // settings that would bring a hidden item back. Never hideable.
-        lockedVisible: true,
-        onSelect: toggleCommandCenter,
-        title: commandCenterOpen ? copy.closeCommandCenter : copy.openCommandCenter,
-        toggleLabel: copy.toggleCommandCenter,
-        variant: 'action'
-      },
-      {
-        hidden: !sessionsShowing,
-        id: 'gateway-switcher',
-        lockedVisible: true,
-        render: () => <StatusbarGatewaySwitcher />
-      },
-      {
-        className: gatewayRestarting ? undefined : gatewayClassName,
-        detail: gatewayRestarting ? copy.gatewayRestarting : gatewayDetail,
-        hidden: botsShowing,
-        icon: gatewayRestarting ? (
-          <GlyphSpinner ariaLabel={copy.gatewayRestarting} className="size-3" />
-        ) : inferenceReady ? (
-          <Activity className="size-3" />
-        ) : (
-          <AlertCircle className="size-3" />
-        ),
-        id: 'gateway-health',
-        label: copy.gateway,
-        menuClassName: 'w-72',
-        menuContent: gatewayMenuContent,
-        // Tip only when there's a real status reason — not "gateway status" restating the label.
-        title: inferenceStatus?.reason || undefined,
-        toggleLabel: copy.gateway,
-        variant: 'menu'
-      },
       {
         hidden: !currentCwd,
         icon: <FolderOpen className="size-3" />,
@@ -465,71 +432,15 @@ export function useStatusbarItems({
         title: currentCwd ? displayPath(currentCwd) : undefined,
         toggleLabel: copy.toggleWorkspace,
         variant: 'menu'
-      },
-      {
-        className: cn(
-          agentsOpen && 'bg-accent/55 text-foreground',
-          subagentsFailed > 0 && 'text-destructive hover:text-destructive'
-        ),
-        detail:
-          subagentsRunning > 0
-            ? copy.subagents(subagentsRunning)
-            : subagentsFailed > 0
-              ? copy.failed(subagentsFailed)
-              : undefined,
-        icon:
-          subagentsFailed > 0 ? (
-            <AlertCircle className="size-3" />
-          ) : subagentsRunning > 0 ? (
-            <Loader2 className="size-3 animate-spin" />
-          ) : (
-            <Codicon name="hubot" size="0.75rem" />
-          ),
-        id: 'agents',
-        label: copy.agents,
-        onSelect: openAgents,
-        title: agentsOpen ? copy.closeAgents : copy.openAgents,
-        toggleLabel: copy.agents,
-        variant: 'action'
-      },
-      {
-        icon: <Clock className="size-3" />,
-        id: 'cron',
-        label: copy.cron,
-        to: CRON_ROUTE,
-        toggleLabel: copy.cron,
-        variant: 'action'
-      },
-      {
-        icon: <Globe className="size-3" />,
-        id: 'webhooks',
-        label: copy.webhooks,
-        to: WEBHOOKS_ROUTE,
-        toggleLabel: copy.webhooks,
-        variant: 'action'
       }
     ],
     [
-      agentsOpen,
-      botsShowing,
-      commandCenterOpen,
       copy,
       currentCwd,
       fileMenu.copyPath,
       fileMenu.revealFileManager,
       fileMenu.revealInSidebar,
-      gatewayMenuContent,
-      gatewayClassName,
-      gatewayDetail,
-      gatewayRestarting,
-      inferenceReady,
-      inferenceStatus?.reason,
-      openAgents,
-      projectName,
-      sessionsShowing,
-      subagentsFailed,
-      subagentsRunning,
-      toggleCommandCenter
+      projectName
     ]
   )
 

@@ -348,7 +348,14 @@ export function TreeGroup({
   // header IS the collapsed form, exactly as before.
   const verticalCollapse = Boolean(node.minimized) && parentAxis === 'row' && !isEmpty
   // A minimized group IS its header, so it shows one regardless.
-  const headerVisible = !isEmpty && !verticalCollapse && (Boolean(node.minimized) || stripVisible)
+  // Web port (mobile): a lone session tab auto-hides the strip upstream,
+  // stranding the tab (no hold/close affordance on touch). Keep the strip
+  // whenever this zone holds a session tab and the user didn't explicitly
+  // hide it (node.tabStrip === 'never' stays respected). Re-anchored for
+  // the 2026-08-27 upstream rename headerHidden → tabStrip mode.
+  const isMobile = useIsMobile()
+  const mobileForceStrip = isMobile && node.tabStrip !== 'never' && shown.some(isSessionStripPane)
+  const headerVisible = !isEmpty && !verticalCollapse && (Boolean(node.minimized) || stripVisible || mobileForceStrip)
 
   // Keep the activated tab — and, on the last one, the trailing "+" — inside
   // the strip's scroll window. Opening a tab past the right edge otherwise

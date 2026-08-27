@@ -317,7 +317,7 @@ patchFile(
 // find anchor is the pre-patch upstream line, so it applies exactly once.
 patchFile(
   'styles.css',
-  'Web port (mobile): composer pad — statusbar owns the safe-area inset',
+  '--composer-shell-pad-block-end: 0.625rem;',
   '--composer-shell-pad-block-end: calc(0.625rem + var(--safe-area-bottom, 0px));',
   `--composer-shell-pad-block-end: 0.625rem; /* Web port (mobile): composer pad — statusbar owns the safe-area inset */`,
 )
@@ -454,12 +454,16 @@ patchFile(
 // under 768px; desktop keeps the toggle.
 patchFile(
   'app/shell/titlebar-controls.tsx',
-  'Web port (mobile): hide dead right-sidebar toggle',
+  'Web port (mobile): the FILES pane is collapsible and leaves the grid',
   `  const rightSidebarTool: TitlebarTool = {
     actionId: 'view.toggleRightSidebar',
     badge: panesFlipped ? unreadBadge : undefined,
     icon: <TitlebarIcon name="layout-sidebar-right" />,
     id: 'right-sidebar',
+    // Web port (mobile): the FILES pane is collapsible and leaves the grid
+    // under 768px, so this toggle has nothing to open on a phone — hide it
+    // there (desktop keeps it).
+    className: 'hidden md:inline-flex',
     label: \`\${rightLabel}\${panesFlipped ? unreadHint : ''}\`,
     onSelect: () => {
       triggerHaptic('tap')
@@ -526,7 +530,6 @@ patchFile(
   'Web port (mobile): statusbar trimmed to plugins/context/folder',
   `  const coreLeftStatusbarItems = useMemo<readonly StatusbarItem[]>(
     () => [
-      ...(connectionItem ? [connectionItem] : []),
       {
         className: \`w-7 justify-center px-0\${commandCenterOpen ? ' bg-accent/55 text-foreground' : ''}\`,
         icon: <Command className="size-3.5" />,
@@ -540,8 +543,15 @@ patchFile(
         variant: 'action'
       },
       {
+        hidden: !sessionsShowing,
+        id: 'gateway-switcher',
+        lockedVisible: true,
+        render: () => <StatusbarGatewaySwitcher />
+      },
+      {
         className: gatewayRestarting ? undefined : gatewayClassName,
         detail: gatewayRestarting ? copy.gatewayRestarting : gatewayDetail,
+        hidden: botsShowing,
         icon: gatewayRestarting ? (
           <GlyphSpinner ariaLabel={copy.gatewayRestarting} className="size-3" />
         ) : inferenceReady ? (
@@ -561,20 +571,158 @@ patchFile(
       {
         hidden: !currentCwd,
         icon: <FolderOpen className="size-3" />,
-        id: 'workspace-cwd',`,
+        id: 'workspace-cwd',
+        // Prefer the named project; fall back to the cwd leaf. Hover tip uses
+        // the shared display formatter (home → ~) so statusbar and branch bar
+        // agree on how a path looks.
+        label: projectName || (currentCwd ? pathLeaf(currentCwd) : undefined),
+        menuItems: currentCwd
+          ? [
+              {
+                id: 'copy-workspace-path',
+                label: fileMenu.copyPath,
+                onSelect: () => void copyFilePath(currentCwd),
+                title: displayPath(currentCwd)
+              },
+              {
+                id: 'reveal-workspace-finder',
+                label: fileMenu.revealFileManager,
+                onSelect: () => void revealFile(currentCwd),
+                title: displayPath(currentCwd)
+              },
+              {
+                id: 'reveal-workspace-sidebar',
+                label: fileMenu.revealInSidebar,
+                onSelect: () => revealFileInTree(currentCwd),
+                title: displayPath(currentCwd)
+              }
+            ]
+          : undefined,
+        title: currentCwd ? displayPath(currentCwd) : undefined,
+        toggleLabel: copy.toggleWorkspace,
+        variant: 'menu'
+      },
+      {
+        className: cn(
+          agentsOpen && 'bg-accent/55 text-foreground',
+          subagentsFailed > 0 && 'text-destructive hover:text-destructive'
+        ),
+        detail:
+          subagentsRunning > 0
+            ? copy.subagents(subagentsRunning)
+            : subagentsFailed > 0
+              ? copy.failed(subagentsFailed)
+              : undefined,
+        icon:
+          subagentsFailed > 0 ? (
+            <AlertCircle className="size-3" />
+          ) : subagentsRunning > 0 ? (
+            <Loader2 className="size-3 animate-spin" />
+          ) : (
+            <Codicon name="hubot" size="0.75rem" />
+          ),
+        id: 'agents',
+        label: copy.agents,
+        onSelect: openAgents,
+        title: agentsOpen ? copy.closeAgents : copy.openAgents,
+        toggleLabel: copy.agents,
+        variant: 'action'
+      },
+      {
+        icon: <Clock className="size-3" />,
+        id: 'cron',
+        label: copy.cron,
+        to: CRON_ROUTE,
+        toggleLabel: copy.cron,
+        variant: 'action'
+      },
+      {
+        icon: <Globe className="size-3" />,
+        id: 'webhooks',
+        label: copy.webhooks,
+        to: WEBHOOKS_ROUTE,
+        toggleLabel: copy.webhooks,
+        variant: 'action'
+      }
+    ],
+    [
+      agentsOpen,
+      botsShowing,
+      commandCenterOpen,
+      copy,
+      currentCwd,
+      fileMenu.copyPath,
+      fileMenu.revealFileManager,
+      fileMenu.revealInSidebar,
+      gatewayMenuContent,
+      gatewayClassName,
+      gatewayDetail,
+      gatewayRestarting,
+      inferenceReady,
+      inferenceStatus?.reason,
+      openAgents,
+      projectName,
+      sessionsShowing,
+      subagentsFailed,
+      subagentsRunning,
+      toggleCommandCenter
+    ]
+  )`,
   `  // Web port (mobile): statusbar trimmed to plugins/context/folder.
   // Everything except the current-folder chip is hidden (plugins arrive via
   // extraRightItems and the context meter survives in the right array).
+  // Re-anchored for the 2026-08-27 upstream restructure that added
+  // gateway-switcher/agents/cron/webhooks to the left array.
   const coreLeftStatusbarItems = useMemo<readonly StatusbarItem[]>(
     () => [
       {
         hidden: !currentCwd,
         icon: <FolderOpen className="size-3" />,
-        id: 'workspace-cwd',`,
+        id: 'workspace-cwd',
+        // Prefer the named project; fall back to the cwd leaf. Hover tip uses
+        // the shared display formatter (home → ~) so statusbar and branch bar
+        // agree on how a path looks.
+        label: projectName || (currentCwd ? pathLeaf(currentCwd) : undefined),
+        menuItems: currentCwd
+          ? [
+              {
+                id: 'copy-workspace-path',
+                label: fileMenu.copyPath,
+                onSelect: () => void copyFilePath(currentCwd),
+                title: displayPath(currentCwd)
+              },
+              {
+                id: 'reveal-workspace-finder',
+                label: fileMenu.revealFileManager,
+                onSelect: () => void revealFile(currentCwd),
+                title: displayPath(currentCwd)
+              },
+              {
+                id: 'reveal-workspace-sidebar',
+                label: fileMenu.revealInSidebar,
+                onSelect: () => revealFileInTree(currentCwd),
+                title: displayPath(currentCwd)
+              }
+            ]
+          : undefined,
+        title: currentCwd ? displayPath(currentCwd) : undefined,
+        toggleLabel: copy.toggleWorkspace,
+        variant: 'menu'
+      }
+    ],
+    [
+      copy,
+      currentCwd,
+      fileMenu.copyPath,
+      fileMenu.revealFileManager,
+      fileMenu.revealInSidebar,
+      projectName
+    ]
+  )`,
 )
 patchFile(
   'app/shell/hooks/use-statusbar-items.tsx',
-  'Web port (mobile): statusbar right — only context survives',
+  'Web port (mobile): statusbar right — only the context meter survives',
   `  const coreRightStatusbarItems = useMemo<readonly StatusbarItem[]>(
     () => [
       {
@@ -627,7 +775,7 @@ patchFile(
 // bypassed). The file is hoisted to the repo-root node_modules.
 patchFile(
   'app/chat/right-rail/preview-tour.ts',
-  'Web port: driver.js IIFE via relative path (exports map bypass)',
+  'Web port: driver.js\'s exports map hides the IIFE path; a bare import',
   `import driverIife from 'driver.js/dist/driver.js.iife.js?raw'`,
   `// Web port: driver.js's exports map hides the IIFE path; a bare import
 // forces externalization (bare specifier in the browser → white page). Use
@@ -657,15 +805,9 @@ import { useIsMobile } from '@/hooks/use-mobile'`,
 )
 patchFile(
   'components/pane-shell/tree/renderer/tree-group.tsx',
-  'a lone session tab auto-hides the strip upstream',
-  'const headerVisible = !isEmpty && !verticalCollapse && (Boolean(node.minimized) || !headerHidden)',
-  `// Web port (mobile): a lone session tab auto-hides the strip upstream,
-  // stranding the tab (no hold/close affordance on touch). Keep the strip
-  // whenever this zone holds a session tab and the user didn't explicitly
-  // hide it (node.headerHidden === true stays respected).
-  const isMobile = useIsMobile()
-  const mobileForceStrip = isMobile && !node.headerHidden && shown.some(isSessionStripPane)
-  const headerVisible = !isEmpty && !verticalCollapse && (Boolean(node.minimized) || !headerHidden || mobileForceStrip)`,
+  'const mobileForceStrip = isMobile && node.tabStrip',
+  '  // A minimized group IS its header, so it shows one regardless.\n  const headerVisible = !isEmpty && !verticalCollapse && (Boolean(node.minimized) || stripVisible)',
+  `  // A minimized group IS its header, so it shows one regardless.\n  // Web port (mobile): a lone session tab auto-hides the strip upstream,\n  // stranding the tab (no hold/close affordance on touch). Keep the strip\n  // whenever this zone holds a session tab and the user didn't explicitly\n  // hide it (node.tabStrip === 'never' stays respected). Re-anchored for\n  // the 2026-08-27 upstream rename headerHidden → tabStrip mode.\n  const isMobile = useIsMobile()\n  const mobileForceStrip = isMobile && node.tabStrip !== 'never' && shown.some(isSessionStripPane)\n  const headerVisible = !isEmpty && !verticalCollapse && (Boolean(node.minimized) || stripVisible || mobileForceStrip)`,
 )
 // iOS long-press on a tab must open the close menu. Safari's native
 // touch-callout swallows contextmenu — the CSS patch below (styles.css,
@@ -703,46 +845,6 @@ patchFile(
 // the Cronjobs pane (placement main, docked right of workspace) are NOT
 // `collapsible`, so on a narrow viewport (<768px, i.e. every phone) they stay
 // as persistent grid columns — Bots eats ~155px and Cronjobs ~149px, squeezing
-// the chat lane to ~86px, and the docked Bots pane fronts on boot. Core panes
-// (sessions/files/review/terminal) all declare `collapsible: true`, which makes
-// them LEAVE the grid on narrow viewports and become exclusive edge-overlay
-// drawers (opened on demand) — the exact mobile behavior we want. Grant Bots +
-// Cronjobs the same flag so a phone boots to the chat, and surfacing Bots or
-// the routine list is an explicit tap, not an autopen.
-patchFile(
-  'plugins/hermes-bots/plugin.js',
-  'collapsible so a phone boots to the chat',
-  "      data: { placement: 'left', width: '260px', dock: { pane: 'sessions', pos: 'center', enforce: true } },",
-  `      data: {
-        placement: 'left',
-        width: '260px',
-        dock: { pane: 'sessions', pos: 'center', enforce: true },
-        // Web port (mobile): collapsible so a phone boots to the chat — Bots
-        // leaves the grid under 768px and becomes an edge-overlay drawer an
-        // explicit tap opens, instead of a column that auto-fronts and blocks
-        // the chat on every reload. (enforce only re-homes the dock position;
-        // it does not defeat the narrow-viewport collapse.)
-        collapsible: true
-      },`,
-)
-patchFile(
-  'plugins/hermes-bots/plugin.js',
-  'collapsible so the Cronjobs list',
-  `        data: {
-          placement: 'main',
-          dock: { pane: 'workspace', pos: 'right' },
-          width: '250px'
-        },`,
-  `        data: {
-          placement: 'main',
-          dock: { pane: 'workspace', pos: 'right' },
-          width: '250px',
-          // Web port (mobile): collapsible so the Cronjobs list doesn't hold a
-          // 149px column on a phone; it becomes a right-edge drawer.
-          collapsible: true
-        },`,
-)
-
 // --- components/ui/pane-tab.tsx: touch long-press opens the close menu --------
 // On desktop a tab's close menu opens on right-click (Radix ContextMenu wraps
 // the zone). A phone has no right-click; iOS long-press sometimes delivers
