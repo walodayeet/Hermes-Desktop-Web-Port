@@ -35,6 +35,26 @@ const DECISIONS_KEY = 'hermes.desktop.pluginDecisions.v2'
 const LEGACY_DISABLED_KEY = 'hermes.desktop.disabledPlugins.v1'
 
 function loadDecisions(): Record<string, boolean> {
+  // Web port (2026-08-27): plugin enable/disable stopped being cross-device
+  // synced (server-settings SYNCED_KEYS no longer carries the decision keys) —
+  // it is a per-browser preference now. But browsers that booted under the old
+  // sync still hold server-derived decisions in localStorage; several plugins
+  // were silently disabled on this device by a toggle made elsewhere, so their
+  // surfaces vanished ("all the custom plugins are gone"). One-time purge: any
+  // stored decision predates the per-device regime, so it cannot be a genuine
+  // device-local choice — drop it and fall back to each plugin's default
+  // (enabled). Future toggles are written by THIS browser and stay honored.
+  try {
+    const MIGRATION_KEY = 'hermes.desktop.pluginDecisions.perDeviceMigrationDone'
+    if (!window.localStorage.getItem(MIGRATION_KEY)) {
+      window.localStorage.removeItem('hermes.desktop.pluginDecisions.v2')
+      window.localStorage.removeItem('hermes.desktop.disabledPlugins.v1')
+      window.localStorage.setItem(MIGRATION_KEY, '1')
+    }
+  } catch {
+    // Nonfatal — keep the stored decisions if storage is unavailable.
+  }
+
   try {
     const raw = window.localStorage.getItem(DECISIONS_KEY)
 
