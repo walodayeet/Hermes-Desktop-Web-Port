@@ -2207,7 +2207,9 @@ export const ar = defineLocale({
       noModels: 'لا توجد نماذج',
       editModels: 'تحرير النماذج',
       refreshModels: 'تحديث النماذج',
-      fast: 'سريع'
+      fast: 'سريع',
+      loadFailed: 'تعذر تحميل قائمة النماذج',
+      loadFailedDetail: 'أحد المزودين غير متاح مؤقتًا. أعد المحاولة أو اختر من القائمة المستعادة.'
     },
     modelOptions: {
       noOptions: 'لا توجد خيارات لهذا النموذج',

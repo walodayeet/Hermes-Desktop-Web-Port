@@ -2801,7 +2801,11 @@ export const en: Translations = {
       noModels: 'No models found',
       editModels: 'Edit Models…',
       refreshModels: 'Refresh Models',
-      fast: 'Fast'
+      fast: 'Fast',
+      // Web port (2026-08-27): model.options can fail whole when a provider
+      // probe 503s — the raw RPC error text used to render as the only row.
+      loadFailed: "Couldn't load the model list",
+      loadFailedDetail: 'A provider is temporarily unavailable. Retry or pick from the recovered list.'
     },
     modelOptions: {
       noOptions: 'No options for this model',

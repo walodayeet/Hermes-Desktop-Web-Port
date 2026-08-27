@@ -158,6 +158,13 @@ export function ModelCatalogMenu({
 
   const providers = modelOptions.data?.providers
 
+  // Web port (2026-08-27): a model.options RPC failure (one provider probe
+  // 503s) used to render the raw backend error string as the only picker
+  // row ("HTTP 503 Service Unavailable"). Show a labeled message instead —
+  // the raw HTTP text is noise; the failure is a provider availability
+  // blip and the query keeps stale rows for the healthy providers.
+  const loadFailed = error !== null && !providers?.length
+
   // The catalog carries MoA presets as a virtual `moa` provider row. Keep it
   // out of the main groups so presets never show up twice.
   const moaPresets = useMemo(
@@ -359,6 +366,10 @@ export function ModelCatalogMenu({
             </DropdownMenuItem>
           ))}
         </DropdownMenuGroup>
+      ) : loadFailed ? (
+        <DropdownMenuItem className={dropdownMenuRow} disabled>
+          {copy.loadFailed}
+        </DropdownMenuItem>
       ) : error ? (
         <DropdownMenuItem className={dropdownMenuRow} disabled>
           {error}

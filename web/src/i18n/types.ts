@@ -2367,6 +2367,8 @@ export interface Translations {
       editModels: string
       refreshModels: string
       fast: string
+      loadFailed: string
+      loadFailedDetail: string
     }
     modelOptions: {
       noOptions: string

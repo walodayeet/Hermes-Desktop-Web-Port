@@ -2965,7 +2965,9 @@ export const zh: Translations = {
       noModels: '未找到模型',
       editModels: '编辑模型…',
       refreshModels: '刷新模型',
-      fast: '快速'
+      fast: '快速',
+      loadFailed: '无法加载模型列表',
+      loadFailedDetail: '某个提供商暂时不可用。请重试或从恢复的列表中选择。'
     },
     modelOptions: {
       noOptions: '此模型没有可用选项',
