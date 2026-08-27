@@ -693,6 +693,26 @@ function withoutBaseIds(rows: ChatMessage[], baseMessages: ChatMessage[]): ChatM
   return rows.filter(row => !baseIds.has(row.id))
 }
 
+/** Append journal rows anchored after the LAST base user message, never at the
+ *  very end of a busy transcript. The pre-existing append paths put a recovered
+ *  reply at `[...base, ...tail]`, which scrambles order when the journal's own
+ *  user prompt already sits mid-transcript (the "recent sessions" wrong-order
+ *  report): the recovered assistant bubble lands after LATER turns' messages.
+ *  Insertion after `lastUser` preserves the tail's own relative order. */
+function appendAfterLastUser(baseMessages: ChatMessage[], tail: ChatMessage[]): ChatMessage[] {
+  const lastUser = baseMessages.findLastIndex(message => message.role === 'user')
+
+  if (lastUser < 0) {
+    return [...baseMessages, ...tail]
+  }
+
+  return [
+    ...baseMessages.slice(0, lastUser + 1),
+    ...tail,
+    ...baseMessages.slice(lastUser + 1)
+  ]
+}
+
 /** Whether every recoverable assistant row in the journal tail already exists
  *  as committed text in the base transcript. When true, the journal outlived
  *  the turn it recorded and appending it would re-render the same answers at
@@ -760,7 +780,7 @@ export function mergeInFlightMessages(
     return {
       applied: true,
       caughtUp: false,
-      messages: [...baseMessages, ...withoutBaseIds(tail, baseMessages)],
+      messages: appendAfterLastUser(baseMessages, withoutBaseIds(tail, baseMessages)),
       // Only a genuinely running turn keeps a live stream target. On an idle
       // resume, carrying the stale streamId would keep the journal entry alive
       // (persistInFlightTurnState only clears when streamId is null) and the
@@ -796,7 +816,7 @@ export function mergeInFlightMessages(
     return {
       applied: true,
       caughtUp: false,
-      messages: [...baseMessages, ...withoutBaseIds(tailAssistants, baseMessages)],
+      messages: appendAfterLastUser(baseMessages, withoutBaseIds(tailAssistants, baseMessages)),
       // Same idle-resume rule as the other exit paths: only a running turn
       // keeps the stream target alive. Carrying the stale streamId here kept
       // the journal entry alive (persistInFlightTurnState only clears when

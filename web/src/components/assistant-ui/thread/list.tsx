@@ -561,7 +561,21 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
     ? 'pt-[calc(var(--titlebar-height)+0.75rem)]'
     : 'pt-[calc(var(--titlebar-height)-0.5rem)]'
 
-  useEffect(() => setThreadAtBottom(isAtBottom), [isAtBottom])
+  // Web port (2026-08-27): only the VISIBLE pane may publish the global
+  // mirror. Every mounted pane used to write $threadScrolledUp /
+  // $threadJumpButtonVisible; a hot-hidden background pane's streaming
+  // `isAtBottom` oscillation flipped the floating jump button on/off and
+  // dimmed the composer ("go to bottom" spam + the composer losing focus —
+  // it's not focus, the composer's dim toggle re-renders over the caret).
+  // The code comment below (575-578) already warns the mirror "can be
+  // overwritten by another mounted pane" — gate the writer, not the readers.
+  useEffect(() => {
+    if (paneLifecycle !== 'visible') {
+      return
+    }
+
+    return setThreadAtBottom(isAtBottom)
+  }, [isAtBottom, paneLifecycle])
   useEffect(() => () => resetThreadScroll(), [])
 
   // Floating jump button (outside this subtree) → return to the bottom.
