@@ -1181,14 +1181,13 @@ patchFile(
 patchFile(
   'store/session-pin-sync.ts',
   'row.pinned === false && !bootReconcilePassed',
-  `    // Web port (mobile): never re-assert a pin the server already reports
-    // unpinned — a stale boot / another device would flip it back and the
-    // pin resurrects hours later or after switching devices. The pull pass
-    // below drops the stale local copy instead.
-    if (row.pinned === false) {
-      continue
-    }`,
-  `    // Web port (mobile): never re-assert a pin the server already reports
+  `    pending.delete(id)
+    mirrored.add(id)
+    void writePin(id, true, row.profile).catch(() => {`,
+  `    pending.delete(id)
+    mirrored.add(id)
+
+    // Web port (mobile): never re-assert a pin the server already reports
     // unpinned — a stale boot / another device would flip it back and the
     // pin resurrects hours later or after switching devices. The pull pass
     // below drops the stale local copy instead.
@@ -1197,11 +1196,13 @@ patchFile(
     // server-backed session list arrives). A live user pin on a row the
     // server still reports pinned=false MUST reach writePin — skipping it
     // silently drops the fresh pin (localStorage shows it, the server never
-    // learns, and the pull pass un-pins it right back). Fixed while
-    // re-anchoring for the 2026-08-25 upstream sync.
+    // learns, and the pull pass un-pins it right back). Re-anchored for the
+    // 2026-08-27 upstream sync that dropped the guard.
     if (row.pinned === false && !bootReconcilePassed) {
       continue
-    }`,
+    }
+
+    void writePin(id, true, row.profile).catch(() => {`,
 )
 // Boot-replay window flag: the never-reassert guard applies ONLY until the
 // first server-backed session list has been reconciled. After that, live
@@ -1224,17 +1225,9 @@ let bootReconcilePassed = false`,
 // change, so the flag latches on the first real list, not the boot call).
 patchFile(
   'store/session-pin-sync.ts',
-  'Web port (mobile): close boot replay on first server list',
-  `  pullRemotePins()
-}`,
-  `  pullRemotePins()
-
-  // Web port (mobile): close the boot-replay window once rows arrived — the
-  // never-reassert guard must not swallow live pins past boot.
-  if ($sessions.get().length > 0) {
-    bootReconcilePassed = true
-  }
-}`,
+  'close the boot-replay window once rows arrived',
+  `  pullRemotePins()\n\n  // Web port (mobile): close the boot-replay window once rows arrived — the\n  // never-reassert guard must not swallow live pins past boot.\n  if ($sessions.get().length > 0) {\n    bootReconcilePassed = true\n  }\n}`,
+  `  pullRemotePins()\n\n  // Web port (mobile): close the boot-replay window once rows arrived — the\n  // never-reassert guard must not swallow live pins past boot.\n  if ($sessions.get().length > 0) {\n    bootReconcilePassed = true\n  }\n}`,
 )
 
 // --- app/context-menu/app-context-menu.tsx: web-port right-click -----------
