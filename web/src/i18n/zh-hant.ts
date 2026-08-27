@@ -1585,7 +1585,11 @@ export const zhHant = defineLocale({
       message: count => `在您檢查模型設定之前，${count} 個排程工作將被略過。`,
       detailMore: (names, remaining) => `${names}，以及另外 ${remaining} 個`,
       review: '檢查排程工作',
-      saveFailed: 'Hermes 未儲存該模型變更。'
+      saveFailed: 'Hermes 未儲存該模型變更。',
+      confirmTitle: '模型選擇警告',
+      confirmDetail: '僅在你接受此權衡時確認。',
+      confirmAction: '確認',
+      declined: '已取消模型變更 — 你拒絕了資料訓練層級警告。'
     },
     search: '搜尋排程工作…',
     loading: '正在載入排程工作…',
@@ -2901,6 +2905,10 @@ export const zhHant = defineLocale({
     editFailed: '編輯失敗',
     editTurnUnavailable: '此回合已不在伺服器歷史中（可能已被壓縮移除）。',
     resumeFailed: '繼續失敗',
+    readOnlyTranscriptTitle: '已以唯讀方式開啟',
+    readOnlyTranscriptBody:
+      '尚無已連線的後端認領這個較早的對話，因此它以唯讀逐字稿方式開啟。歷史紀錄完好；在有後端認領之前無法傳送訊息。',
+    readOnlyTranscriptSendBlocked: '此對話目前以唯讀逐字稿方式開啟——傳送已停用。',
     resumeStrandedTitle: '無法載入此工作階段',
     resumeStrandedBody: '與此工作階段的連線失敗，自動重試已停止。請確認閘道正在執行，然後重試。',
     resumeRetry: '重試',

@@ -205,10 +205,6 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
     badge: panesFlipped ? unreadBadge : undefined,
     icon: <TitlebarIcon name="layout-sidebar-right" />,
     id: 'right-sidebar',
-    // Web port (mobile): the FILES pane is collapsible and leaves the grid
-    // under 768px, so this toggle has nothing to open on a phone — hide it
-    // there (desktop keeps it).
-    className: 'hidden md:inline-flex',
     label: `${rightLabel}${panesFlipped ? unreadHint : ''}`,
     onSelect: () => {
       triggerHaptic('tap')

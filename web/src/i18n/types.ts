@@ -689,6 +689,23 @@ export interface Translations {
       cancel: string
       empty: string
     }
+    managedUpdates: {
+      title: string
+      intro: string
+      sshConnection: string
+      update: string
+      updating: string
+      progress: string
+      updated: string
+      partial: string
+      refused: string
+      failed: string
+      alreadyRunning: string
+      receipt: (id: string, outcome: string) => string
+      receiptVersions: (pre: string, post: string) => string
+      scopesRestored: (profiles: string) => string
+      scopeNotRestored: (profile: string, error: string) => string
+    }
     gateway: {
       loading: string
       unavailableTitle: string
@@ -1657,6 +1674,10 @@ export interface Translations {
       detailMore: (names: string, remaining: number) => string
       review: string
       saveFailed: string
+      confirmTitle: string
+      confirmDetail: string
+      confirmAction: string
+      declined: string
     }
     search: string
     loading: string
@@ -2367,8 +2388,6 @@ export interface Translations {
       editModels: string
       refreshModels: string
       fast: string
-      loadFailed: string
-      loadFailedDetail: string
     }
     modelOptions: {
       noOptions: string
@@ -2909,6 +2928,9 @@ export interface Translations {
     editFailed: string
     editTurnUnavailable: string
     resumeFailed: string
+    readOnlyTranscriptTitle: string
+    readOnlyTranscriptBody: string
+    readOnlyTranscriptSendBlocked: string
     resumeStrandedTitle: string
     resumeStrandedBody: string
     resumeRetry: string
