@@ -446,46 +446,10 @@ patchFile(
   '}, [plugin, text])',
 )
 
-// --- titlebar-controls.tsx: hide the right-sidebar toggle on mobile --------
-// The `right-sidebar` titlebar button toggles the FILES pane, which is
-// `collapsible: true` — it leaves the grid on narrow viewports and becomes an
-// edge-overlay drawer. On a phone the button therefore has nothing to open
-// (the pane is collapsed by default) and reads as a dead button. Hide it
-// under 768px; desktop keeps the toggle.
-patchFile(
-  'app/shell/titlebar-controls.tsx',
-  'Web port (mobile): the FILES pane is collapsible and leaves the grid',
-  `  const rightSidebarTool: TitlebarTool = {
-    actionId: 'view.toggleRightSidebar',
-    badge: panesFlipped ? unreadBadge : undefined,
-    icon: <TitlebarIcon name="layout-sidebar-right" />,
-    id: 'right-sidebar',
-    // Web port (mobile): the FILES pane is collapsible and leaves the grid
-    // under 768px, so this toggle has nothing to open on a phone — hide it
-    // there (desktop keeps it).
-    className: 'hidden md:inline-flex',
-    label: \`\${rightLabel}\${panesFlipped ? unreadHint : ''}\`,
-    onSelect: () => {
-      triggerHaptic('tap')
-      rightEdge.toggle()
-    }
-  }`,
-  `  const rightSidebarTool: TitlebarTool = {
-    actionId: 'view.toggleRightSidebar',
-    badge: panesFlipped ? unreadBadge : undefined,
-    icon: <TitlebarIcon name="layout-sidebar-right" />,
-    id: 'right-sidebar',
-    // Web port (mobile): the FILES pane is collapsible and leaves the grid
-    // under 768px, so this toggle has nothing to open on a phone — hide it
-    // there (desktop keeps it).
-    className: 'hidden md:inline-flex',
-    label: \`\${rightLabel}\${panesFlipped ? unreadHint : ''}\`,
-    onSelect: () => {
-      triggerHaptic('tap')
-      rightEdge.toggle()
-    }
-  }`,
-)
+// --- titlebar-controls.tsx: legacy right-sidebar toggle patch dropped --------
+// NOTE (2026-08-28): the upstream sync removed the `rightSidebarTool` block
+// entirely — the file now carries a stray `undefined` literal where it stood.
+// Nothing left to hide; the patch target no longer exists. Entry dropped.
 
 // --- titlebar-controls.tsx: mobile command-palette button --------------------------
 patchFile(
@@ -985,7 +949,7 @@ export function refreshPluginDecisions(): void {
 // written by THIS browser and stay honored. Swallows storage errors.
 patchFile(
   'contrib/plugins-store.ts',
-  'hermes.desktop.pluginDecisions.perDeviceMigrationDone',
+  'perDeviceMigrationDone',
   'function loadDecisions(): Record<string, boolean> {',
   `function loadDecisions(): Record<string, boolean> {
   // Web port: one-time purge of server-synced plugin decisions (pre-2026-08-27
@@ -1356,8 +1320,16 @@ let bootReconcilePassed = false`,
 patchFile(
   'store/session-pin-sync.ts',
   'close the boot-replay window once rows arrived',
-  `  pullRemotePins()\n\n  // Web port (mobile): close the boot-replay window once rows arrived — the\n  // never-reassert guard must not swallow live pins past boot.\n  if ($sessions.get().length > 0) {\n    bootReconcilePassed = true\n  }\n}`,
-  `  pullRemotePins()\n\n  // Web port (mobile): close the boot-replay window once rows arrived — the\n  // never-reassert guard must not swallow live pins past boot.\n  if ($sessions.get().length > 0) {\n    bootReconcilePassed = true\n  }\n}`,
+  `  pullRemotePins()
+}`,
+  `  pullRemotePins()
+
+  // Web port (mobile): close the boot-replay window once rows arrived — the
+  // never-reassert guard must not swallow live pins past boot.
+  if ($sessions.get().length > 0) {
+    bootReconcilePassed = true
+  }
+}`,
 )
 
 // --- app/context-menu/app-context-menu.tsx: web-port right-click -----------
@@ -1654,6 +1626,21 @@ patchFile(
   }
 
   return conn.wsUrl`,
+)
+// Web port (mobile/perf): window long sessions EARLIER so a text-heavy
+// conversation doesn't materialize the whole transcript (assistant-ui mounts
+// every message in the window; 1200 weight units ≈ 600 plain text messages —
+// a long chat renders all of it and the page gets slow/unstable). Cut the
+// store window to ~400 units ≈ 200 plain messages; "Show earlier" pages the
+// rest from the store on demand. MIN_MESSAGES (30) + branch-group alignment
+// still floor the tail, and the sticky-anchor streaming path is untouched.
+patchFile(
+  'app/chat/transcript-window.ts',
+  'export const TRANSCRIPT_WINDOW_BUDGET = 400',
+  'export const TRANSCRIPT_WINDOW_BUDGET = 1200',
+  `// Web port (mobile/perf): 1200 → 400 — window long sessions earlier so the
+// DOM never materializes whole text-heavy transcripts (see patcher note).
+export const TRANSCRIPT_WINDOW_BUDGET = 400`,
 )
 
 if (touched === 0) {

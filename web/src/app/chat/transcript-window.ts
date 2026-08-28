@@ -26,7 +26,9 @@ import { messageStoreWeight } from '@/lib/render-weight'
  * — and the reported crash shape (~231K tokens ≈ 2,260 units) is windowed
  * rather than handed to the repository whole.
  */
-export const TRANSCRIPT_WINDOW_BUDGET = 1200
+// Web port (mobile/perf): 1200 → 400 — window long sessions earlier so the
+// DOM never materializes whole text-heavy transcripts (see patcher note).
+export const TRANSCRIPT_WINDOW_BUDGET = 400
 
 /**
  * Floor on messages kept regardless of weight. A transcript of enormous turns

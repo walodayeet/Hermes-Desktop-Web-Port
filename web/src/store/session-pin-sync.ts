@@ -340,6 +340,12 @@ function reconcileInner(): void {
   }
 
   pullRemotePins()
+
+  // Web port (mobile): close the boot-replay window once rows arrived — the
+  // never-reassert guard must not swallow live pins past boot.
+  if ($sessions.get().length > 0) {
+    bootReconcilePassed = true
+  }
 }
 
 // Sync once, then re-sync on pin-set and session-list changes. Call once per app.
