@@ -35,6 +35,20 @@ const DECISIONS_KEY = 'hermes.desktop.pluginDecisions.v2'
 const LEGACY_DISABLED_KEY = 'hermes.desktop.disabledPlugins.v1'
 
 function loadDecisions(): Record<string, boolean> {
+  // Web port: one-time purge of server-synced plugin decisions (pre-2026-08-27
+  // cross-device sync hid plugins: tasks/drafts/session-search stored false by
+  // ANOTHER device's toggle). Per-browser regime now — a stored decision that
+  // predates the purge cannot be a genuine local choice. Drop once, then keep.
+  try {
+const MIGRATION_KEY = ['hermes.desktop.pluginDecisions', 'perDeviceMigrationDone'].join('.')
+    if (!window.localStorage.getItem(MIGRATION_KEY)) {
+      window.localStorage.removeItem('hermes.desktop.pluginDecisions.v2')
+      window.localStorage.removeItem('hermes.desktop.disabledPlugins.v1')
+      window.localStorage.setItem(MIGRATION_KEY, '1')
+    }
+  } catch {
+    // Nonfatal — keep stored decisions if storage is unavailable.
+  }
   try {
     const raw = window.localStorage.getItem(DECISIONS_KEY)
 

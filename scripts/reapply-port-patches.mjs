@@ -975,6 +975,34 @@ export function refreshPluginDecisions(): void {
   $pluginDecisions.set(loadDecisions())
 }`,
 )
+// Per-device plugin decisions: one-time purge of server-synced decisions.
+// Plugin enable/disable is a per-browser preference (server-settings
+// SYNCED_KEYS no longer carries the decision keys). Browsers that booted
+// under the old sync still hold server-derived decisions in localStorage,
+// and several disk plugins were silently disabled elsewhere then propagated
+// here — "the plugins are missing". One-time purge: drop stored decisions so
+// every plugin falls back to its default (enabled). Future toggles are
+// written by THIS browser and stay honored. Swallows storage errors.
+patchFile(
+  'contrib/plugins-store.ts',
+  'hermes.desktop.pluginDecisions.perDeviceMigrationDone',
+  'function loadDecisions(): Record<string, boolean> {',
+  `function loadDecisions(): Record<string, boolean> {
+  // Web port: one-time purge of server-synced plugin decisions (pre-2026-08-27
+  // cross-device sync hid plugins: tasks/drafts/session-search stored false by
+  // ANOTHER device's toggle). Per-browser regime now — a stored decision that
+  // predates the purge cannot be a genuine local choice. Drop once, then keep.
+  try {
+const MIGRATION_KEY = ['hermes.desktop.pluginDecisions', 'perDeviceMigrationDone'].join('.')
+    if (!window.localStorage.getItem(MIGRATION_KEY)) {
+      window.localStorage.removeItem('hermes.desktop.pluginDecisions.v2')
+      window.localStorage.removeItem('hermes.desktop.disabledPlugins.v1')
+      window.localStorage.setItem(MIGRATION_KEY, '1')
+    }
+  } catch {
+    // Nonfatal — keep stored decisions if storage is unavailable.
+  }`,
+)
 
 patchFile(
   'styles.css',
