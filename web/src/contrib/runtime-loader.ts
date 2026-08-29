@@ -376,6 +376,10 @@ async function loadDiskPlugin(entry: DiskPlugin): Promise<boolean> {
 
       return true
     }
+    // Web port (2026-08-29): surface the actual load failure in the console —
+    // previously a failed disk-plugin import was swallowed into a silent
+    // return-false and the plugin vanished from the inventory.
+    console.error('[plugins] ' + entry.origin + ' failed to load', error)
 
     return false
   }
@@ -471,6 +475,19 @@ async function scanDiskPlugins(): Promise<void> {
         disk.set(file, record)
 
         if (!(await loadDiskPlugin(record))) {
+          // Web port (2026-08-29): a load failure used to vanish silently
+          // (disk.delete + continue) — the inventory just showed fewer
+          // plugins with no clue why. Publish an error row so the user sees
+          // the plugin + its failure in Settings → Plugins instead of a
+          // mysterious absence.
+          publishPlugin({
+            id: record.origin,
+            name: record.origin,
+            kind: 'disk',
+            file,
+            status: 'error',
+            error: 'Failed to load — check the console for the import/eval error'
+          })
           disk.delete(file)
 
           continue

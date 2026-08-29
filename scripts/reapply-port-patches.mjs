@@ -1531,6 +1531,57 @@ patchFile(
       loadFailedDetail: 'أحد المزودين غير متاح مؤقتًا. أعد المحاولة أو اختر من القائمة المستعادة.'
     },`,
 )
+// Web port: disk-plugin load failures must be VISIBLE. A failed disk-plugin
+// import used to `return false` silently and the plugin vanished from the
+// inventory ("3 installed" when 7 disk plugins exist, no clue why). Publish an
+// error row in the inventory + log the real cause to the console.
+patchFile(
+  'contrib/runtime-loader.ts',
+  'Failed to load — check the console for the import/eval error',
+  `        if (!(await loadDiskPlugin(record))) {
+          disk.delete(file)
+
+          continue
+        }`,
+  `        if (!(await loadDiskPlugin(record))) {
+          // Web port (2026-08-29): a load failure used to vanish silently
+          // (disk.delete + continue) — the inventory just showed fewer
+          // plugins with no clue why. Publish an error row so the user sees
+          // the plugin + its failure in Settings → Plugins instead of a
+          // mysterious absence.
+          publishPlugin({
+            id: record.origin,
+            name: record.origin,
+            kind: 'disk',
+            file,
+            status: 'error',
+            error: 'Failed to load — check the console for the import/eval error'
+          })
+          disk.delete(file)
+
+          continue
+        }`,
+)
+patchFile(
+  'contrib/runtime-loader.ts',
+  'surface the actual load failure in the console',
+  `      return true
+    }
+
+    return false
+  }
+}`,
+  `      return true
+    }
+    // Web port (2026-08-29): surface the actual load failure in the console —
+    // previously a failed disk-plugin import was swallowed into a silent
+    // return-false and the plugin vanished from the inventory.
+    console.error('[plugins] ' + entry.origin + ' failed to load', error)
+
+    return false
+  }
+}`,
+)
 
 if (touched === 0) {
   console.log('no patches applied (all present)')
