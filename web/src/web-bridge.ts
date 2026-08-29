@@ -807,6 +807,8 @@ export function installWebBridge(): void {
       open: async () => ({ ok: false }),
       close: async () => ({ ok: false }),
       setIgnoreMouse: () => {},
+      beginMove: () => {},
+      endMove: () => {},
       moveBy: () => {},
       setBounds: () => {},
       resetLayout: async () => ({ ok: false }),

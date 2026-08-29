@@ -21,9 +21,32 @@ const setter = (target: WritableAtom<boolean>) => (value: boolean) => {
 const setScrolledUp = setter($threadScrolledUp)
 const setJumpButtonVisible = setter($threadJumpButtonVisible)
 
+let awaySince: null | number = null
+
 export const setThreadAtBottom = (isAtBottom: boolean) => {
-  setScrolledUp(!isAtBottom)
-  setJumpButtonVisible(!isAtBottom)
+  if (isAtBottom) {
+    // At the bottom: clear the "away" latch immediately — a streamed token
+    // that momentarily grows scrollHeight must not flip the button.
+    awaySince = null
+    setScrolledUp(false)
+    setJumpButtonVisible(false)
+    return
+  }
+
+  // Away from the bottom: latch AFTER the user has truly left (~180ms), so
+  // normal live-token growth while parked at the bottom never spams the
+  // button or dims the composer over the caret.
+  if (awaySince === null) {
+    awaySince = Date.now()
+    return
+  }
+
+  if (Date.now() - awaySince < 180) {
+    return
+  }
+
+  setScrolledUp(true)
+  setJumpButtonVisible(true)
 }
 
 export const resetThreadScroll = () => setThreadAtBottom(true)

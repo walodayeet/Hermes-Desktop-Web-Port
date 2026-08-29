@@ -588,6 +588,12 @@ export const en: Translations = {
       introSplashDesc: 'The wordmark and prompt shown on an empty chat.',
       reactionsTitle: 'Message Reactions',
       reactionsDesc: 'iMessage-style emoji tapbacks — react to messages, and Hermes can react to yours.',
+      tipsTitle: 'In-App Tips',
+      tipsDesc:
+        'A small bubble pointing at one part of the app, shown occasionally while idle and by Hermes when it helps. Closing one retires it for good.',
+      tipsReset: (count: number) => `Bring back ${count} closed ${count === 1 ? 'tip' : 'tips'}`,
+      toursTitle: 'Guided Tours',
+      toursDesc: 'Let Hermes walk you through the app, dimming the screen and spotlighting each step.',
       composerPopoutTitle: 'Floating Composer',
       composerPopoutDesc: 'Allow dragging the composer out of its dock. Turn this off to keep it locked at the bottom.',
       vibeHeartsTitle: 'Vibe Hearts',
@@ -2823,7 +2829,9 @@ export const en: Translations = {
       noModels: 'No models found',
       editModels: 'Edit Models…',
       refreshModels: 'Refresh Models',
-      fast: 'Fast'
+      fast: 'Fast',
+      loadFailed: "Couldn't load the model list",
+      loadFailedDetail: 'A provider is temporarily unavailable. Retry or pick from the recovered list.'
     },
     modelOptions: {
       noOptions: 'No options for this model',
@@ -3456,6 +3464,52 @@ export const en: Translations = {
       systemNote: platform => `↻ Handed off to ${platform} — resume here anytime.`,
       failed: error => `Handoff failed: ${error}`,
       timedOut: 'Timed out waiting for the gateway. Is `hermes gateway` running?'
+    }
+  },
+
+  tips: {
+    close: "Don't show this tip again",
+    items: {
+      'new-session': {
+        title: 'Start fresh',
+        text: 'A new chat gets its own context, terminal and working directory.'
+      },
+      skills: {
+        title: 'Teach it once',
+        text: 'Skills are folders of instructions Hermes loads when the work calls for them.'
+      },
+      messaging: {
+        title: 'Hermes away from your desk',
+        text: 'Connect Telegram, Discord, Slack and more — same agent, same memory.'
+      },
+      artifacts: {
+        title: 'Everything Hermes made',
+        text: 'Images, files and links from every session, indexed in one place.'
+      },
+      cron: {
+        title: 'Work that runs itself',
+        text: 'Schedule a prompt hourly, nightly, or on a cron expression.'
+      },
+      'command-palette': {
+        title: 'One box for everything',
+        text: 'Sessions, settings, skills and commands all answer to the palette.'
+      },
+      profiles: {
+        title: 'Profiles are separate',
+        text: 'Each one is its own Hermes — own keys, own memory, own sessions.'
+      },
+      'composer-mentions': {
+        title: 'Attach and command',
+        text: 'Type @ to bring a file into the conversation, / to run a command.'
+      },
+      'model-switch': {
+        title: 'Switch models mid-thread',
+        text: 'The model name is a button. Change it whenever the work changes shape.'
+      },
+      'right-pane': {
+        title: 'The working pane',
+        text: 'Files, terminal, review and the in-app browser share the right side.'
+      }
     }
   },
 

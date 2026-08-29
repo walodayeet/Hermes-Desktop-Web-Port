@@ -477,6 +477,11 @@ select,
     --dt-popover-foreground: var(--ui-text-primary);
     --dt-primary: var(--theme-primary);
     --dt-primary-foreground: #fcfcfc;
+    /* Boot-paint fallbacks. themes/context.tsx replaces --dt-primary-solid with
+       the hue deepened until #fcfcfc clears AA on it; until it runs, the raw
+       primary is the closest honest guess. */
+    --dt-primary-solid: var(--theme-primary);
+    --dt-primary-solid-foreground: #fcfcfc;
     --dt-secondary: var(--theme-secondary);
     --dt-secondary-foreground: var(--ui-text-secondary);
     --dt-accent: var(--theme-accent-soft);
@@ -1725,6 +1730,19 @@ body.guest-pointer-lock :is(webview, iframe) {
 
   display: flex;
   container-type: inline-size;
+}
+
+/* The display lettering an empty chat is titled with. Kept here beside
+   `.fit-text` rather than as utilities on the element: the two always travel
+   together, and the face is the whole point of the treatment — it must not be
+   something a class-merge or a missed scan can quietly drop, leaving the
+   wordmark rendered in body text. */
+.wordmark {
+  font-family: 'Collapse', var(--font-sans);
+  font-weight: 700;
+  line-height: 0.9;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
 .fit-text > [aria-hidden] {

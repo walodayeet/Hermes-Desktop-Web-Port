@@ -479,257 +479,6 @@ patchFile(
     },`,
 )
 
-// --- use-statusbar-items.tsx: trim statusbar to plugins + context + folder --
-// Web-port phone layout: the statusbar is a fixed 20px strip; every extra
-// item crowds the few that matter. User asked for ONLY: plugin contributions,
-// the context meter, and the current folder. Remove the command-center,
-// gateway-health, agents/cron/webhooks route shortcuts, timers, approval
-// mode, terminal toggle, and version pills. Plugins arrive via
-// extraRightItems (they're not in these core arrays), so they survive.
-// ONE whole-array replacement, marker-guarded at the top of each array (the
-// marker is the comment the insert writes, so a re-run skips — no double
-// application like per-item patches would).
-patchFile(
-  'app/shell/hooks/use-statusbar-items.tsx',
-  'Web port (mobile): statusbar trimmed to plugins/context/folder',
-  `  const coreLeftStatusbarItems = useMemo<readonly StatusbarItem[]>(
-    () => [
-      {
-        className: \`w-7 justify-center px-0\${commandCenterOpen ? ' bg-accent/55 text-foreground' : ''}\`,
-        icon: <Command className="size-3.5" />,
-        id: 'command-center',
-        // The system icon: the way into every other surface, including the
-        // settings that would bring a hidden item back. Never hideable.
-        lockedVisible: true,
-        onSelect: toggleCommandCenter,
-        title: commandCenterOpen ? copy.closeCommandCenter : copy.openCommandCenter,
-        toggleLabel: copy.toggleCommandCenter,
-        variant: 'action'
-      },
-      {
-        hidden: !sessionsShowing,
-        id: 'gateway-switcher',
-        lockedVisible: true,
-        render: () => <StatusbarGatewaySwitcher />
-      },
-      {
-        className: gatewayRestarting ? undefined : gatewayClassName,
-        detail: gatewayRestarting ? copy.gatewayRestarting : gatewayDetail,
-        hidden: botsShowing,
-        icon: gatewayRestarting ? (
-          <GlyphSpinner ariaLabel={copy.gatewayRestarting} className="size-3" />
-        ) : inferenceReady ? (
-          <Activity className="size-3" />
-        ) : (
-          <AlertCircle className="size-3" />
-        ),
-        id: 'gateway-health',
-        label: copy.gateway,
-        menuClassName: 'w-72',
-        menuContent: gatewayMenuContent,
-        // Tip only when there's a real status reason — not "gateway status" restating the label.
-        title: inferenceStatus?.reason || undefined,
-        toggleLabel: copy.gateway,
-        variant: 'menu'
-      },
-      {
-        hidden: !currentCwd,
-        icon: <FolderOpen className="size-3" />,
-        id: 'workspace-cwd',
-        // Prefer the named project; fall back to the cwd leaf. Hover tip uses
-        // the shared display formatter (home → ~) so statusbar and branch bar
-        // agree on how a path looks.
-        label: projectName || (currentCwd ? pathLeaf(currentCwd) : undefined),
-        menuItems: currentCwd
-          ? [
-              {
-                id: 'copy-workspace-path',
-                label: fileMenu.copyPath,
-                onSelect: () => void copyFilePath(currentCwd),
-                title: displayPath(currentCwd)
-              },
-              {
-                id: 'reveal-workspace-finder',
-                label: fileMenu.revealFileManager,
-                onSelect: () => void revealFile(currentCwd),
-                title: displayPath(currentCwd)
-              },
-              {
-                id: 'reveal-workspace-sidebar',
-                label: fileMenu.revealInSidebar,
-                onSelect: () => revealFileInTree(currentCwd),
-                title: displayPath(currentCwd)
-              }
-            ]
-          : undefined,
-        title: currentCwd ? displayPath(currentCwd) : undefined,
-        toggleLabel: copy.toggleWorkspace,
-        variant: 'menu'
-      },
-      {
-        className: cn(
-          agentsOpen && 'bg-accent/55 text-foreground',
-          subagentsFailed > 0 && 'text-destructive hover:text-destructive'
-        ),
-        detail:
-          subagentsRunning > 0
-            ? copy.subagents(subagentsRunning)
-            : subagentsFailed > 0
-              ? copy.failed(subagentsFailed)
-              : undefined,
-        icon:
-          subagentsFailed > 0 ? (
-            <AlertCircle className="size-3" />
-          ) : subagentsRunning > 0 ? (
-            <Loader2 className="size-3 animate-spin" />
-          ) : (
-            <Codicon name="hubot" size="0.75rem" />
-          ),
-        id: 'agents',
-        label: copy.agents,
-        onSelect: openAgents,
-        title: agentsOpen ? copy.closeAgents : copy.openAgents,
-        toggleLabel: copy.agents,
-        variant: 'action'
-      },
-      {
-        icon: <Clock className="size-3" />,
-        id: 'cron',
-        label: copy.cron,
-        to: CRON_ROUTE,
-        toggleLabel: copy.cron,
-        variant: 'action'
-      },
-      {
-        icon: <Globe className="size-3" />,
-        id: 'webhooks',
-        label: copy.webhooks,
-        to: WEBHOOKS_ROUTE,
-        toggleLabel: copy.webhooks,
-        variant: 'action'
-      }
-    ],
-    [
-      agentsOpen,
-      botsShowing,
-      commandCenterOpen,
-      copy,
-      currentCwd,
-      fileMenu.copyPath,
-      fileMenu.revealFileManager,
-      fileMenu.revealInSidebar,
-      gatewayMenuContent,
-      gatewayClassName,
-      gatewayDetail,
-      gatewayRestarting,
-      inferenceReady,
-      inferenceStatus?.reason,
-      openAgents,
-      projectName,
-      sessionsShowing,
-      subagentsFailed,
-      subagentsRunning,
-      toggleCommandCenter
-    ]
-  )`,
-  `  // Web port (mobile): statusbar trimmed to plugins/context/folder.
-  // Everything except the current-folder chip is hidden (plugins arrive via
-  // extraRightItems and the context meter survives in the right array).
-  // Re-anchored for the 2026-08-27 upstream restructure that added
-  // gateway-switcher/agents/cron/webhooks to the left array.
-  const coreLeftStatusbarItems = useMemo<readonly StatusbarItem[]>(
-    () => [
-      {
-        hidden: !currentCwd,
-        icon: <FolderOpen className="size-3" />,
-        id: 'workspace-cwd',
-        // Prefer the named project; fall back to the cwd leaf. Hover tip uses
-        // the shared display formatter (home → ~) so statusbar and branch bar
-        // agree on how a path looks.
-        label: projectName || (currentCwd ? pathLeaf(currentCwd) : undefined),
-        menuItems: currentCwd
-          ? [
-              {
-                id: 'copy-workspace-path',
-                label: fileMenu.copyPath,
-                onSelect: () => void copyFilePath(currentCwd),
-                title: displayPath(currentCwd)
-              },
-              {
-                id: 'reveal-workspace-finder',
-                label: fileMenu.revealFileManager,
-                onSelect: () => void revealFile(currentCwd),
-                title: displayPath(currentCwd)
-              },
-              {
-                id: 'reveal-workspace-sidebar',
-                label: fileMenu.revealInSidebar,
-                onSelect: () => revealFileInTree(currentCwd),
-                title: displayPath(currentCwd)
-              }
-            ]
-          : undefined,
-        title: currentCwd ? displayPath(currentCwd) : undefined,
-        toggleLabel: copy.toggleWorkspace,
-        variant: 'menu'
-      }
-    ],
-    [
-      copy,
-      currentCwd,
-      fileMenu.copyPath,
-      fileMenu.revealFileManager,
-      fileMenu.revealInSidebar,
-      projectName
-    ]
-  )`,
-)
-patchFile(
-  'app/shell/hooks/use-statusbar-items.tsx',
-  'Web port (mobile): statusbar right — only the context meter survives',
-  `  const coreRightStatusbarItems = useMemo<readonly StatusbarItem[]>(
-    () => [
-      {
-        detail: <LiveDuration since={turnStartedAt} />,
-        hidden: !busy || !turnStartedAt,
-        icon: <Loader2 className="size-3 animate-spin" />,
-        id: 'running-timer',
-        label: copy.turnRunning,
-        toggleLabel: copy.toggleRunningTimer,
-        variant: 'text'
-      },
-      {
-        detail: contextBar || undefined,
-        hidden: !contextUsage,
-        id: 'context-usage',
-        label: contextUsage,
-        menuAlign: 'end',
-        menuClassName: 'w-auto border-(--ui-stroke-secondary) p-0',
-        menuContent: (
-          <ContextUsagePanel breakdown={contextBreakdown} loading={contextBreakdownLoading} usage={gaugeUsage} />
-        ),
-        toggleLabel: copy.toggleContextUsage,
-        variant: 'menu'
-      },`,
-  `  // Web port (mobile): statusbar right — only the context meter survives;
-  // timers/approval/terminal/version are hidden (plugins come via extraRightItems).
-  const coreRightStatusbarItems = useMemo<readonly StatusbarItem[]>(
-    () => [
-      {
-        detail: contextBar || undefined,
-        hidden: !contextUsage,
-        id: 'context-usage',
-        label: contextUsage,
-        menuAlign: 'end',
-        menuClassName: 'w-auto border-(--ui-stroke-secondary) p-0',
-        menuContent: (
-          <ContextUsagePanel breakdown={contextBreakdown} loading={contextBreakdownLoading} usage={gaugeUsage} />
-        ),
-        toggleLabel: copy.toggleContextUsage,
-        variant: 'menu'
-      },`,
-)
-
 // --- app/chat/right-rail/preview-tour.ts: resolve driver.js IIFE via path ---
 // driver.js's exports map does NOT expose `./dist/driver.js.iife.js`, so Vite
 // can't bundle `driver.js/dist/driver.js.iife.js?raw`. Upstream externalizes
@@ -1641,6 +1390,146 @@ patchFile(
   `// Web port (mobile/perf): 1200 → 400 — window long sessions earlier so the
 // DOM never materializes whole text-heavy transcripts (see patcher note).
 export const TRANSCRIPT_WINDOW_BUDGET = 400`,
+)
+// Web port (mobile/perf): STOP the "go to bottom" button spam + composer
+// focus-steal. The upstream setThreadAtBottom mirrors isAtBottom 1:1 into
+// $threadScrolledUp/$threadJumpButtonVisible; during streaming every token
+// grows scrollHeight, isAtBottom flips false→true per tick, the floating
+// button appears/disappears constantly ("spams"), and the composer dim toggle
+// re-renders over the input — which reads as the chatbox losing focus. Fix:
+// hysteresis — once scrolled up, STAY up until a real bottom; once bottom,
+// hold until the user has been away ~180ms (debounce) so per-tick growth
+// can't flip it. Restored as a patcher entry (the direct edit was clobbered
+// by the 2026-08-27 upstream sync).
+patchFile(
+  'store/thread-scroll.ts',
+  'let awaySince: null | number = null',
+  `export const setThreadAtBottom = (isAtBottom: boolean) => {
+  setScrolledUp(!isAtBottom)
+  setJumpButtonVisible(!isAtBottom)
+}`,
+  `let awaySince: null | number = null
+
+export const setThreadAtBottom = (isAtBottom: boolean) => {
+  if (isAtBottom) {
+    // At the bottom: clear the "away" latch immediately — a streamed token
+    // that momentarily grows scrollHeight must not flip the button.
+    awaySince = null
+    setScrolledUp(false)
+    setJumpButtonVisible(false)
+    return
+  }
+
+  // Away from the bottom: latch AFTER the user has truly left (~180ms), so
+  // normal live-token growth while parked at the bottom never spams the
+  // button or dims the composer over the caret.
+  if (awaySince === null) {
+    awaySince = Date.now()
+    return
+  }
+
+  if (Date.now() - awaySince < 180) {
+    return
+  }
+
+  setScrolledUp(true)
+  setJumpButtonVisible(true)
+}`,
+)
+// Bug-3 restoration (clobbered by 2026-08-27 sync): journal recovery must
+// anchor recovered assistant rows after the LAST user message, not at the
+// transcript end (scrambled order on recent sessions).
+patchFile(
+  'lib/inflight-turn-journal.ts',
+  'scrambled order on recent sessions).\n *  Web port restoration — the direct edit was clobbered',
+  `function journalTailAlreadyCommitted(tailAssistants: ChatMessage[], baseMessages: ChatMessage[]): boolean {`,
+  `/** Append journal rows anchored after the LAST base user message, never at
+ *  the very end of a busy transcript (scrambled order on recent sessions).
+ *  Web port restoration — the direct edit was clobbered by the sync. */
+function appendAfterLastUser(baseMessages: ChatMessage[], tail: ChatMessage[]): ChatMessage[] {
+  const lastUser = baseMessages.findLastIndex(message => message.role === 'user')
+
+  if (lastUser < 0) {
+    return [...baseMessages, ...tail]
+  }
+
+  return [
+    ...baseMessages.slice(0, lastUser + 1),
+    ...tail,
+    ...baseMessages.slice(lastUser + 1)
+  ]
+}
+
+function journalTailAlreadyCommitted(tailAssistants: ChatMessage[], baseMessages: ChatMessage[]): boolean {`,
+)
+// Bug-restore: 503 model-picker friendly error (clobbered by sync).
+patchFile(
+  'app/shell/model-catalog-menu.tsx',
+  't.shell.modelMenu.loadFailed',
+  `) : error ? (
+        <DropdownMenuItem className={dropdownMenuRow} disabled>
+          {error}
+        </DropdownMenuItem>
+      ) : groups.length === 0 && moaPresets.length === 0 ? (`,
+  `) : error && !providers?.length ? (
+        <DropdownMenuItem className={dropdownMenuRow} disabled>
+          {t.shell.modelMenu.loadFailed}
+        </DropdownMenuItem>
+      ) : error ? (
+        <DropdownMenuItem className={dropdownMenuRow} disabled>
+          {error}
+        </DropdownMenuItem>
+      ) : groups.length === 0 && moaPresets.length === 0 ? (`,
+)
+// 503-picker i18n keys (web port): the model-menu block needs loadFailed /
+// loadFailedDetail — restored after the sync dropped them.
+patchFile(
+  'i18n/types.ts',
+  'loadFailed: string\n      loadFailedDetail: string\n    }',
+  `      refreshModels: string
+      fast: string
+    }`,
+  `      refreshModels: string
+      fast: string
+      loadFailed: string
+      loadFailedDetail: string
+    }`,
+)
+patchFile(
+  'i18n/en.ts',
+  "Couldn't load the model list",
+  `      refreshModels: 'Refresh Models',
+      fast: 'Fast'
+    },`,
+  `      refreshModels: 'Refresh Models',
+      fast: 'Fast',
+      loadFailed: "Couldn't load the model list",
+      loadFailedDetail: 'A provider is temporarily unavailable. Retry or pick from the recovered list.'
+    },`,
+)
+patchFile(
+  'i18n/zh.ts',
+  '无法加载模型列表',
+  `      refreshModels: '刷新模型',
+      fast: '快速'
+    },`,
+  `      refreshModels: '刷新模型',
+      fast: '快速',
+      loadFailed: '无法加载模型列表',
+      loadFailedDetail: '某个提供商暂时不可用。请重试或从恢复的列表中选择。'
+    },`,
+)
+patchFile(
+  'i18n/ar.ts',
+  'تعذر تحميل قائمة النماذج',
+  `      refreshModels: 'تحديث النماذج',
+      fast: 'سريع'
+    },`,
+  `      refreshModels: 'تحديث النماذج',
+      fast: 'سريع',
+      loadFailed: 'تعذر تحميل قائمة النماذج',
+      loadFailedDetail: 'أحد المزودين غير متاح مؤقتًا. أعد المحاولة أو اختر من القائمة المستعادة.'
+    },`,
 )
 
 if (touched === 0) {

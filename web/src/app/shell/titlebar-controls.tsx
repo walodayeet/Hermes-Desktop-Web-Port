@@ -52,6 +52,9 @@ export interface TitlebarTool {
   badge?: number
   title?: string
   to?: string
+  /** Durable `data-tour` handle. Tools are addressed by icon and translated
+   *  label otherwise, and neither survives a theme or a locale change. */
+  tour?: string
 }
 
 export type TitlebarToolSide = 'left' | 'right'
@@ -209,7 +212,8 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
     onSelect: () => {
       triggerHaptic('tap')
       rightEdge.toggle()
-    }
+    },
+    tour: 'right-pane-toggle'
   }
 
   // Static system tools — always pinned to the screen's right edge.
@@ -350,6 +354,7 @@ function TitlebarToolButton({ navigate, tool }: { navigate: ReturnType<typeof us
         <Button asChild className={className} size="icon-titlebar" variant="ghost">
           <a
             aria-label={tool.label}
+            data-tour={tool.tour}
             href={tool.href}
             onPointerDown={event => event.stopPropagation()}
             rel="noreferrer"
@@ -368,6 +373,7 @@ function TitlebarToolButton({ navigate, tool }: { navigate: ReturnType<typeof us
         aria-label={tool.label}
         aria-pressed={tool.active ?? undefined}
         className={className}
+        data-tour={tool.tour}
         disabled={tool.disabled}
         onClick={event => {
           if (tool.to) {

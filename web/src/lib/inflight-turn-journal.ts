@@ -697,6 +697,23 @@ function withoutBaseIds(rows: ChatMessage[], baseMessages: ChatMessage[]): ChatM
  *  as committed text in the base transcript. When true, the journal outlived
  *  the turn it recorded and appending it would re-render the same answers at
  *  the end of the transcript (the "scrambled conversation" regression). */
+/** Append journal rows anchored after the LAST base user message, never at
+ *  the very end of a busy transcript (scrambled order on recent sessions).
+ *  Web port restoration — the direct edit was clobbered by the sync. */
+function appendAfterLastUser(baseMessages: ChatMessage[], tail: ChatMessage[]): ChatMessage[] {
+  const lastUser = baseMessages.findLastIndex(message => message.role === 'user')
+
+  if (lastUser < 0) {
+    return [...baseMessages, ...tail]
+  }
+
+  return [
+    ...baseMessages.slice(0, lastUser + 1),
+    ...tail,
+    ...baseMessages.slice(lastUser + 1)
+  ]
+}
+
 function journalTailAlreadyCommitted(tailAssistants: ChatMessage[], baseMessages: ChatMessage[]): boolean {
   const recoverable = tailAssistants.filter(assistantHasRecoverableContent)
 

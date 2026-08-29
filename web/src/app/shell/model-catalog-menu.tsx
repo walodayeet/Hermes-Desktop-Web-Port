@@ -359,6 +359,10 @@ export function ModelCatalogMenu({
             </DropdownMenuItem>
           ))}
         </DropdownMenuGroup>
+      ) : error && !providers?.length ? (
+        <DropdownMenuItem className={dropdownMenuRow} disabled>
+          {t.shell.modelMenu.loadFailed}
+        </DropdownMenuItem>
       ) : error ? (
         <DropdownMenuItem className={dropdownMenuRow} disabled>
           {error}
