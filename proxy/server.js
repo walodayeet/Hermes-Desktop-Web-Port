@@ -622,6 +622,9 @@ function serveStatic(req, res) {
 // GET /api/plugins-door/list → { entries: [{name, path, isDirectory}] }
 // Only folders containing a plugin.js are listed (the renderer loader probes
 // readFileText and skips 404s, but pre-filtering keeps the door honest).
+// GET /api/plugins-door/list?path=/plugins/<name> → same shape for a plugin
+// folder, so the loader's per-folder metadata walk (resolveDiskPluginEntry)
+// works — without it the walk falls through to /web-fs and silently bails.
 // GET /api/plugins-door/file?path=/plugins/<name>/plugin.js → { path, text }
 // Path is strictly validated: no traversal, single segment, exact filename.
 function servePluginsDoor(req, res) {
@@ -668,6 +671,34 @@ function servePluginsDoor(req, res) {
       dirents = fs.readdirSync(PLUGINS_DIR, { withFileTypes: true });
     } catch {
       // No door yet — empty listing; the renderer's poll picks it up later.
+    }
+    // Subfolder listing: /api/plugins-door/list?path=/plugins/<name> returns
+    // the folder's entries (the loader walks each plugin folder to find
+    // plugin.js — resolveDiskPluginEntry — before reading it).
+    const sub = u.searchParams.get('path') || '';
+    if (sub) {
+      const sm = /^\/plugins\/([^/]+)$/.exec(sub);
+      if (!sm) {
+        send(400, { error: 'bad_path', detail: 'expected /plugins/<name>' });
+        return;
+      }
+      const subRoot = path.resolve(PLUGINS_DIR);
+      const subDir = path.resolve(subRoot, sm[1]);
+      if (!subDir.startsWith(subRoot + path.sep)) {
+        send(400, { error: 'bad_path', detail: 'outside plugins root' });
+        return;
+      }
+      let subEntries = [];
+      try {
+        subEntries = fs.readdirSync(subDir, { withFileTypes: true });
+      } catch {
+        send(404, { error: 'not_found', detail: `no such plugin folder: ${sm[1]}` });
+        return;
+      }
+      send(200, {
+        entries: subEntries.map((d) => ({ name: d.name, path: `${sub}/${d.name}`, isDirectory: d.isDirectory() })),
+      });
+      return;
     }
     const entries = dirents
       .filter((d) => d.isDirectory() && fs.existsSync(path.join(PLUGINS_DIR, d.name, 'plugin.js')))

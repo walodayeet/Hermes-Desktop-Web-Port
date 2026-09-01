@@ -1391,6 +1391,37 @@ patchFile(
 // DOM never materializes whole text-heavy transcripts (see patcher note).
 export const TRANSCRIPT_WINDOW_BUDGET = 400`,
 )
+// Web port (mobile/perf): STOP the streaming tail-boundary churn that flickers
+// on-screen rows. liveTailStart walks the WEIGHTED groups; the streaming turn's
+// weight grows every token, so the boundary moved and rows flipped
+// content-visibility:auto in/out while visible — a repaint per flip = the chat
+// "flicker". Clamp the LAST group's weight to 1 for the tail walk: the newest
+// turn is always in the tail via LIVE_TAIL_MIN_GROUPS anyway, and pinning its
+// weight keeps the boundary driven by SETTLED turns only — stable across
+// tokens. Marker: the tailWeightedGroups clamp (exact substring of the insert).
+patchFile(
+  'components/assistant-ui/thread/list.tsx',
+  'const tailWeightedGroups = useMemo',
+  `const tailStart = useMemo(
+    () => liveTailStart(hiddenCount > 0 ? weightedGroups.slice(hiddenCount) : weightedGroups),
+    [weightedGroups, hiddenCount]
+  )`,
+  `const tailWeightedGroups = useMemo(() => {
+    if (weightedGroups.length === 0) {
+      return weightedGroups
+    }
+
+    return weightedGroups.map((group, index) =>
+      index === weightedGroups.length - 1 ? { ...group, weight: Math.min(group.weight, 1) } : group
+    )
+  }, [weightedGroups])
+
+  const tailStart = useMemo(
+    () => liveTailStart(hiddenCount > 0 ? tailWeightedGroups.slice(hiddenCount) : tailWeightedGroups),
+    [tailWeightedGroups, hiddenCount]
+  )`,
+)
+
 // Web port (mobile/perf): STOP the "go to bottom" button spam + composer
 // focus-steal. The upstream setThreadAtBottom mirrors isAtBottom 1:1 into
 // $threadScrolledUp/$threadJumpButtonVisible; during streaming every token
@@ -1497,11 +1528,11 @@ patchFile(
 )
 patchFile(
   'i18n/en.ts',
-  "Couldn't load the model list",
-  `      refreshModels: 'Refresh Models',
+  'loadFailed: "Couldn\'t load the model list"',
+  `      refreshModels: 'Refresh models',
       fast: 'Fast'
     },`,
-  `      refreshModels: 'Refresh Models',
+  `      refreshModels: 'Refresh models',
       fast: 'Fast',
       loadFailed: "Couldn't load the model list",
       loadFailedDetail: 'A provider is temporarily unavailable. Retry or pick from the recovered list.'

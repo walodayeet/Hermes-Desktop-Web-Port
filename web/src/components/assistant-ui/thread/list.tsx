@@ -554,9 +554,19 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
   // Where the always-rendered live tail begins. Derived from the WEIGHTED
   // groups (render cost, not turns) so the tail is a viewport's worth of content —
   // see liveTailStart. Computed once here rather than per row.
+  const tailWeightedGroups = useMemo(() => {
+    if (weightedGroups.length === 0) {
+      return weightedGroups
+    }
+
+    return weightedGroups.map((group, index) =>
+      index === weightedGroups.length - 1 ? { ...group, weight: Math.min(group.weight, 1) } : group
+    )
+  }, [weightedGroups])
+
   const tailStart = useMemo(
-    () => liveTailStart(hiddenCount > 0 ? weightedGroups.slice(hiddenCount) : weightedGroups),
-    [weightedGroups, hiddenCount]
+    () => liveTailStart(hiddenCount > 0 ? tailWeightedGroups.slice(hiddenCount) : tailWeightedGroups),
+    [tailWeightedGroups, hiddenCount]
   )
 
   // Secondary windows (new-session scratch, subagent watch, cmd-click pop-out)

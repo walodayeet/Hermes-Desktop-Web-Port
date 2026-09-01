@@ -33,7 +33,7 @@ HOST_SERVICES=(hermes-dashboard.service hermes-gateway.service)
 # endpoint that the fleet-update script probes. Messaging-only containers
 # (grandpa, telegram) run gateway but no serve — probe their gateway instead
 # (any hermes process alive + well).
-SERVE_CONTAINERS=(hermes-dad hermes-cousin hermes-family)
+SERVE_CONTAINERS=(hermes-dad hermes-cousin hermes-family hermes-kim hermes-long)
 GATEWAY_ONLY=(hermes-grandpa hermes-telegram)
 
 CHECK_ONLY=0

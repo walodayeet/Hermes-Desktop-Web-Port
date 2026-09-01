@@ -1228,6 +1228,15 @@ export function installWebBridge(): void {
         if (!res.ok) return { entries: [] }
         return res.json()
       }
+      // Per-plugin-folder walk (the loader's resolveDiskPluginEntry reads
+      // /plugins/<name> to locate plugin.js). Falls through to the web-fs
+      // door otherwise, which 400s "outside web-fs root" and the plugin is
+      // silently skipped — the disk inventory bug.
+      if (dir?.startsWith('/plugins/')) {
+        const res = await fetch(`/api/plugins-door/list?path=${encodeURIComponent(dir)}`)
+        if (!res.ok) return { entries: [] }
+        return res.json()
+      }
       const res = await fetch(`/web-fs/list?path=${encodeURIComponent(dir)}`)
       if (!res.ok) return { entries: [] }
       return res.json()

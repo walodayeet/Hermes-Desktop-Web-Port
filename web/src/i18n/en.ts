@@ -48,10 +48,10 @@ export const en: Translations = {
   fileMenu: {
     revealFinder: 'Reveal in Finder',
     revealExplorer: 'Reveal in File Explorer',
-    revealFileManager: 'Open Containing Folder',
+    revealFileManager: 'Open containing folder',
     revealInSidebar: 'Reveal in filetree',
-    copyPath: 'Copy Path',
-    copyRelativePath: 'Copy Relative Path',
+    copyPath: 'Copy path',
+    copyRelativePath: 'Copy relative path',
     download: 'Download',
     downloadSaved: 'Saved',
     downloadFailed: 'Download failed',
@@ -1248,6 +1248,16 @@ export const en: Translations = {
         selectedMessage: backend => `Terminal commands now run via ${backend}. Applies to new sessions.`,
         failedSelect: backend => `Failed to select ${backend}`,
         needsSetupHint: 'You can select this backend now — commands will fail until setup is complete.'
+      },
+      browserRealProfile: {
+        label: 'Use My Real Browser Profile',
+        description:
+          "Copies your default browser's logins and cookies into a managed snapshot the agent browses with. Your live profile is never opened directly. Applies to new sessions.",
+        enabledTitle: 'Real-profile browsing on',
+        enabledMessage: 'New sessions will browse with a snapshot of your default browser profile.',
+        disabledTitle: 'Real-profile browsing off',
+        disabledMessage: 'The profile snapshot will be deleted; new sessions use a clean browser.',
+        failedSave: 'Could not save the real-profile setting'
       }
     }
   },
@@ -1904,6 +1914,7 @@ export const en: Translations = {
     defaultBadge: 'Default',
     rename: 'Rename',
     renameMenu: 'Rename…',
+    exportMenu: 'Export…',
     editSoul: 'Edit SOUL.md…',
     copySetup: 'Copy setup',
     copying: 'Copying...',
@@ -2209,7 +2220,7 @@ export const en: Translations = {
       removeFolder: 'Remove',
       create: 'Create',
       menu: 'Actions',
-      menuRename: 'Rename',
+      menuRename: 'Rename…',
       menuAppearance: 'Appearance',
       noColor: 'No color',
       menuAddFolder: 'Add folder',
@@ -2279,7 +2290,7 @@ export const en: Translations = {
       copyId: 'Copy ID',
       export: 'Export',
       branchFrom: 'Branch',
-      rename: 'Rename',
+      rename: 'Rename…',
       archive: 'Archive',
       newWindow: 'New window',
       openInTerminal: 'Open in terminal',
@@ -2527,8 +2538,8 @@ export const en: Translations = {
       behind: count => `${count} behind`,
       review: 'Review',
       close: 'Close',
-      openChanges: 'Open Changes',
-      openFile: 'Open File',
+      openChanges: 'Open changes',
+      openFile: 'Open file',
       stage: 'Stage',
       unstage: 'Unstage',
       stageAll: 'Stage all',
@@ -2827,8 +2838,8 @@ export const en: Translations = {
     modelMenu: {
       search: 'Search models',
       noModels: 'No models found',
-      editModels: 'Edit Models…',
-      refreshModels: 'Refresh Models',
+      editModels: 'Edit models…',
+      refreshModels: 'Refresh models',
       fast: 'Fast',
       loadFailed: "Couldn't load the model list",
       loadFailedDetail: 'A provider is temporarily unavailable. Retry or pick from the recovered list.'

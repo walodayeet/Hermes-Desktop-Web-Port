@@ -79,6 +79,7 @@ type BotsMessages = {
   bot: {
     newTitle: string
     editTitle: string
+    editMenu: string
     helpPromptPlaceholder: string
     descriptionHint: string
     newChatWith: string
@@ -155,6 +156,9 @@ type BotsMessages = {
     hideActivity: string
     stop: string
     stopHint: string
+    allHeldStatus: (count: number) => string
+    heldMembersStatus: (members: string) => string
+    holdReleaseHint: string
     needsYourInput: string
     pictureGenerationFailed: string
     nameTaken: (name: string) => string
@@ -281,8 +285,9 @@ const en: BotsMessages = {
       'Waiting for the gateway connection… (remote gateways can take a few seconds; retries automatically)'
   },
   bot: {
-    newTitle: 'New Bot',
-    editTitle: 'Edit Profile',
+    newTitle: 'New bot',
+    editTitle: 'Edit profile',
+    editMenu: 'Edit…',
     helpPromptPlaceholder: 'What should this bot help with?',
     descriptionHint: 'Leave blank to generate from the bot’s name and description.',
     newChatWith: 'New chat with this bot',
@@ -325,7 +330,7 @@ const en: BotsMessages = {
     generating: 'Generating…'
   },
   group: {
-    newTitle: 'New Group Chat',
+    newTitle: 'New group chat',
     manageDesc: 'A bot can join multiple group chats. Memberships sync to every machine.',
     manageTitle: 'Manage groups',
     settingsTitle: 'Group settings',
@@ -336,7 +341,7 @@ const en: BotsMessages = {
     removeFromSelection: 'Remove from selection',
     disbandTitle: 'Disband group chat?',
     deleteTitle: 'Delete group chat?',
-    deleteAction: 'Delete Group',
+    deleteAction: 'Delete',
     composerPlaceholder: 'Say something — every bot in this group hears the room.',
     attachHint: 'Attach files — every responding bot sees them',
     newThread: 'New Thread',
@@ -352,6 +357,9 @@ const en: BotsMessages = {
     hideActivity: 'Hide room activity',
     stop: 'Stop',
     stopHint: 'Stop this run — interrupts the member on turn and holds the rest',
+    allHeldStatus: count => `All ${count} bots are paused`,
+    heldMembersStatus: members => `Paused: ${members}`,
+    holdReleaseHint: 'Mention a paused bot or send @all resume to release them.',
     needsYourInput: 'A bot in this group chat needs your input',
     pictureGenerationFailed: 'Group picture generation failed',
     nameTaken: name => `A group named “${name}” already exists.`,
@@ -473,6 +481,7 @@ const ja: BotsMessages = {
   bot: {
     newTitle: '新しいボット',
     editTitle: 'プロファイルを編集',
+    editMenu: '編集…',
     helpPromptPlaceholder: 'このボットは何を手伝いますか？',
     descriptionHint: '空欄のままにすると、ボットの名前と説明から生成します。',
     newChatWith: 'このボットと新しいチャット',
@@ -526,7 +535,7 @@ const ja: BotsMessages = {
     removeFromSelection: '選択から外す',
     disbandTitle: 'グループチャットを解散しますか？',
     deleteTitle: 'グループチャットを削除しますか？',
-    deleteAction: 'グループを削除',
+    deleteAction: '削除',
     composerPlaceholder: '何か書いてください — このグループのすべてのボットが部屋の内容を受け取ります。',
     attachHint: 'ファイルを添付 — 応答するすべてのボットが見ます',
     newThread: '新しいスレッド',
@@ -542,6 +551,9 @@ const ja: BotsMessages = {
     hideActivity: '部屋のアクティビティを隠す',
     stop: '停止',
     stopHint: 'この実行を停止 — ターン中のメンバーを中断し、残りを保留します',
+    allHeldStatus: count => `すべてのボット（${count}体）が一時停止中`,
+    heldMembersStatus: members => `一時停止中: ${members}`,
+    holdReleaseHint: '一時停止中のボットにメンションするか、@all resume を送信して再開します。',
     needsYourInput: 'このグループチャットのボットが入力を待っています',
     pictureGenerationFailed: 'グループ画像の生成に失敗しました',
     nameTaken: name => `「${name}」という名前のグループはすでに存在します。`,
@@ -662,6 +674,7 @@ const zh: BotsMessages = {
   bot: {
     newTitle: '新建机器人',
     editTitle: '编辑配置档案',
+    editMenu: '编辑…',
     helpPromptPlaceholder: '这个机器人应该帮你做什么？',
     descriptionHint: '留空则根据机器人的名称和描述生成。',
     newChatWith: '与此机器人开新聊天',
@@ -715,7 +728,7 @@ const zh: BotsMessages = {
     removeFromSelection: '从选择中移除',
     disbandTitle: '解散群聊？',
     deleteTitle: '删除群聊？',
-    deleteAction: '删除群组',
+    deleteAction: '删除',
     composerPlaceholder: '说点什么 — 这个群里的每个机器人都会听到。',
     attachHint: '附加文件 — 每个回应的机器人都能看到',
     newThread: '新帖子',
@@ -731,6 +744,9 @@ const zh: BotsMessages = {
     hideActivity: '隐藏房间活动',
     stop: '停止',
     stopHint: '停止本次运行 — 中断当前回合的成员，并暂停其余成员',
+    allHeldStatus: count => `全部 ${count} 个机器人已暂停`,
+    heldMembersStatus: members => `已暂停：${members}`,
+    holdReleaseHint: '提及已暂停的机器人，或发送 @all resume 以恢复它们。',
     needsYourInput: '此群聊中有机器人需要你输入',
     pictureGenerationFailed: '群组图片生成失败',
     nameTaken: name => `已存在名为“${name}”的群聊。`,
@@ -851,6 +867,7 @@ const zhHant: BotsMessages = {
   bot: {
     newTitle: '新增機器人',
     editTitle: '編輯設定檔',
+    editMenu: '編輯…',
     helpPromptPlaceholder: '這個機器人應該幫你做什麼？',
     descriptionHint: '留空則依機器人的名稱和描述產生。',
     newChatWith: '與此機器人開新聊天',
@@ -904,7 +921,7 @@ const zhHant: BotsMessages = {
     removeFromSelection: '從選取中移除',
     disbandTitle: '解散群組聊天？',
     deleteTitle: '刪除群組聊天？',
-    deleteAction: '刪除群組',
+    deleteAction: '刪除',
     composerPlaceholder: '說點什麼 — 這個群組裡的每個機器人都會聽到。',
     attachHint: '附加檔案 — 每個回應的機器人都能看到',
     newThread: '新討論串',
@@ -920,6 +937,9 @@ const zhHant: BotsMessages = {
     hideActivity: '隱藏房間活動',
     stop: '停止',
     stopHint: '停止本次執行 — 中斷目前回合的成員，並暫停其餘成員',
+    allHeldStatus: count => `全部 ${count} 個機器人已暫停`,
+    heldMembersStatus: members => `已暫停：${members}`,
+    holdReleaseHint: '提及已暫停的機器人，或傳送 @all resume 以恢復它們。',
     needsYourInput: '此群組聊天中有機器人需要您的輸入',
     pictureGenerationFailed: '群組圖片產生失敗',
     nameTaken: name => `已存在名為「${name}」的群組聊天。`,
