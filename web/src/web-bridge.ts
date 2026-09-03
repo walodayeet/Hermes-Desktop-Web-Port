@@ -624,6 +624,12 @@ function makeTerminal() {
     })
 
   return {
+    // Web port: PTY output is buffered per-session inside this factory and
+    // replayed to any onData listener registered after boot (openSession →
+    // dataBuf), so the attach() contract from the upstream electron attach
+    // flow ("preserve terminal startup output") is already satisfied by
+    // construction. Report attached whenever the session is still known.
+    attach: async (id: string) => sessions.has(id),
     cwd: async () => null,
     dispose: async (id: string) => {
       const s = sessions.get(id)
@@ -725,6 +731,16 @@ export function installWebBridge(): void {
         ok: false as const,
       }),
     ),
+    // Web port: pool sizing is a device-local Electron-main preference (how
+    // many warm bot backends stay spawned, and for how long). A browser tab
+    // runs against the shared local backend, which owns no warm-pool knobs,
+    // so report the defaults as the limits in force and accept sets as no-ops
+    // (store/pool-limits keeps its defaults and renders normally).
+    getPoolLimits: async () => ({
+      maxBackends: 3,
+      idleMs: 10 * 60_000,
+    }),
+    setPoolLimits: async () => ({ ok: true, limits: { maxBackends: 3, idleMs: 10 * 60_000 } }),
 
     // --- REST -----------------------------------------------------------------
     api: async <T>(request: {

@@ -530,19 +530,6 @@ async function openSecondary(entry: Secondary): Promise<void> {
         // Best effort for partial test/HMR graphs. Production always loads the
         // real store; a failed import must not make the transport unrecoverable.
       }
-
-      // Runtime re-mint also invalidates the status-stack gone-latch: ids
-      // the dead runtime 4001'd may be live again once tiles re-resume.
-      // Fire-and-forget: composer-status imports from this module, so the
-      // import must stay dynamic (cycle), and it must NOT sit on the timed
-      // redial path — awaiting the module load here pushed cold-start
-      // redials past test/waitFor budgets. The reset needs no ordering
-      // guarantee relative to the dial.
-      void import('@/store/composer-status')
-        .then(({ resetBackgroundPollingGuard }) => resetBackgroundPollingGuard())
-        .catch(() => {
-          // Best effort for partial test/HMR graphs, same as above.
-        })
     }
 
     // Registry-scoped entries dial through getConnectionFor when the bridge has
@@ -741,15 +728,16 @@ function createSecondary(profile: string, connectionId: null | string = null): S
       clearTimer(entry)
     } else if (state === 'closed' || state === 'error') {
       // A dead socket cannot emit the terminal event that normally releases
-      // its turn lease. BUT a mid-turn lease must survive a transport blip:
-      // the gateway keeps the running turn alive past a detach (it only
-      // interrupts after its own orphan grace) and the reconnected socket
-      // re-attaches to the same runtime session. Releasing here violates the
-      // "hold until message.complete/session.info settles the turn" contract
-      // and hands the backend an orphan it will interrupt as `client_gone`
-      // within seconds — which is exactly the refresh-kills-the-turn bug.
-      // Only drop leases that have NO active turn in flight (route-level
-      // holds are tracked separately by activeRequests).
+      // its turn lease. Drop the orphaned lease before deciding whether this
+      // route is still retained/active enough to reconnect.
+      // Web port: a browser tab dies without the gateway's orphan-grace
+      // machinery when the page reloads — the socket closes and there is no
+      // reconnecting renderer to re-attach to the running turn. Upstream's
+      // drop-lease-blindly is right for Electron (a reload re-arms its own
+      // leases on reconnect); on a tab reload the backend would orphan the
+      // in-flight turn and interrupt it as `client_gone`. So only drop leases
+      // that carry NO live turn — mid-turn leases must survive a transport
+      // blip so the reconnected tab re-attaches to the same runtime session.
       if (!hasActiveTurnLeasesForScope(scope)) {
         releaseTurnLeasesForScope(scope)
       }
@@ -1203,16 +1191,6 @@ function cancelTurnLeaseRelease(key: string): void {
   }
 }
 
-function hasActiveTurnLeasesForScope(scope: string): boolean {
-  const prefix = `${scope}\u0000`
-  for (const key of g.turnLeases.keys()) {
-    if (key.startsWith(prefix)) {
-      return true
-    }
-  }
-  return false
-}
-
 function releaseTurnLeasesForScope(scope: string): void {
   const prefix = `${scope}\u0000`
 
@@ -1230,6 +1208,17 @@ function releaseTurnLeasesForScope(scope: string): void {
   }
 }
 
+/** Whether any (scope, session) turn lease is still holding a live turn. */
+function hasActiveTurnLeasesForScope(scope: string): boolean {
+  const prefix = `${scope}\u0000`
+  for (const key of g.turnLeases.keys()) {
+    if (key.startsWith(prefix)) {
+      return true
+    }
+  }
+  return false
+}
+
 /**
  * Keep a routed Desktop prompt's socket alive after prompt.submit ACKs.
  *
@@ -1244,6 +1233,13 @@ export async function retainGatewayForSessionTurn(
   profile: string,
   sessionId: string
 ): Promise<() => void> {
+  // Primary events do not flow through a Secondary's terminal-event listener.
+  // Registering a no-op lease here would leave a phantom key that can suppress
+  // the real hold if this route is later re-homed as a secondary.
+  if (isPrimaryRegistryRoute(connectionId, normKey(profile))) {
+    return () => undefined
+  }
+
   const scope = registryBackendScopeKey(connectionId, normKey(profile))
   const key = turnLeaseKey(scope, sessionId)
 
@@ -1607,6 +1603,24 @@ export function reconnectSecondaryGateways({ forceOpenSockets = false }: { force
     clearTimer(entry)
     void reconnectSecondary(entry)
   }
+}
+
+// How many non-primary backends currently hold an open socket. Hover-intent
+// prewarming consults this before spawning: a speculative spawn that pushes
+// the pool past its cap causes the Electron main to LRU-evict a warm backend
+// — often one the user is about to click — turning the prewarm into churn
+// (the #91545 evict/respawn cascade). The active gateway's backend is
+// primary-routed and never counts toward the pool cap.
+export function openSecondaryCount(): number {
+  let count = 0
+
+  for (const entry of g.secondaries.values()) {
+    if (isOpen(entry.gateway)) {
+      count += 1
+    }
+  }
+
+  return count
 }
 
 // Keep the idle reaper from killing a backend we still need: ping every live
