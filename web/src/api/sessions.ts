@@ -341,24 +341,12 @@ export function setSessionArchived(id: string, archived: boolean, profile?: stri
 // sweep (which runs backend-side, blind to Desktop localStorage) never hides a
 // pinned chat. Best-effort: the sidebar stays localStorage-driven for its own
 // display; this only feeds the backend policy.
-export function setSessionPinnedRemote(
-  id: string,
-  pinned: boolean,
-  profile?: string | null,
-  connectionId?: null | string
-): Promise<{ ok: boolean }> {
+export function setSessionPinnedRemote(id: string, pinned: boolean, profile?: string | null): Promise<{ ok: boolean }> {
   // Owning profile in the PATCH body (see setSessionArchived / renameSession):
   // the handler reads its target DB from body.profile, so a remote/foreign
   // profile's pin must travel in the body or it no-ops on the wrong state.db.
   return hermesApi<{ ok: boolean }>({
     ...(profile ? { profile } : {}),
-    // Route to the owning CONNECTION, not the ambient active one. Under
-    // registry topology (multi-gateway web fleet) an unpin PATCHed to the
-    // active gateway while the session lives on another registered backend
-    // silently misses — the real owner keeps pinned=true and re-adopts the
-    // pin on the next device / pull. A request-level connectionId overrides
-    // connectionScoped()'s ambient tag in hermesApi.
-    ...(connectionId ? { connectionId } : {}),
     path: `/api/sessions/${encodeURIComponent(id)}`,
     method: 'PATCH',
     body: { pinned, ...(profile ? { profile } : {}) }

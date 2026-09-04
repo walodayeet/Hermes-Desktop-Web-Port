@@ -1530,46 +1530,6 @@ export async function resolveStoredSession(
     }
   }
 
-  // Cross-CONNECTION rung: the profile probes above only cover the CURRENT
-  // connection's profiles. Under registry topology a session can live on a
-  // DIFFERENT registered gateway (the 4-container web fleet: each tab is
-  // bound to one connection, but the session list is shared) — the read-only
-  // transcript recovery probes those backends, but the live owner ladder did
-  // not, so opening such a session threw SessionOwnerResolutionError
-  // ("couldn't open this session") instead of routing to its real owner.
-  // Mirror the read-only probe: try each registered NON-local connection by
-  // id (one cheap by-id lookup each), and on a hit stamp the row with the
-  // owning connection so every later session-scoped RPC routes to it.
-  const { $connectionsRegistry } = await import('@/store/connection-registry-state')
-  const { getApiRequestConnection } = await import('@/api/client')
-
-  const connections = ($connectionsRegistry.get()?.connections ?? []) as Array<{ id?: string }>
-  const currentConnection = getApiRequestConnection()?.trim()
-
-  for (const connection of connections) {
-    const connectionId = connection.id?.trim()
-
-    if (!connectionId || connectionId === 'local' || connectionId === currentConnection) {
-      continue
-    }
-
-    try {
-      const session = await getSession(storedSessionId, { connectionId, profile: 'default' })
-
-      // The DESKTOP connection that answered is authoritative — the remote
-      // backend answers as its own "default", but the row belongs to this
-      // registry entry (the same ownership contract the profile probes use).
-      session.connection_id = connectionId
-      session.profile = normalizeProfileKey(session.profile || 'default')
-
-      upsertResolvedSession(session, storedSessionId)
-
-      return session
-    } catch {
-      // Not on this backend (or it is unreachable); try the next.
-    }
-  }
-
   return undefined
 }
 

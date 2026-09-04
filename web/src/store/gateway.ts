@@ -730,17 +730,7 @@ function createSecondary(profile: string, connectionId: null | string = null): S
       // A dead socket cannot emit the terminal event that normally releases
       // its turn lease. Drop the orphaned lease before deciding whether this
       // route is still retained/active enough to reconnect.
-      // Web port: a browser tab dies without the gateway's orphan-grace
-      // machinery when the page reloads — the socket closes and there is no
-      // reconnecting renderer to re-attach to the running turn. Upstream's
-      // drop-lease-blindly is right for Electron (a reload re-arms its own
-      // leases on reconnect); on a tab reload the backend would orphan the
-      // in-flight turn and interrupt it as `client_gone`. So only drop leases
-      // that carry NO live turn — mid-turn leases must survive a transport
-      // blip so the reconnected tab re-attaches to the same runtime session.
-      if (!hasActiveTurnLeasesForScope(scope)) {
-        releaseTurnLeasesForScope(scope)
-      }
+      releaseTurnLeasesForScope(scope)
 
       if (entry.wantOpen) {
         scheduleReconnect(entry)
@@ -1206,17 +1196,6 @@ function releaseTurnLeasesForScope(scope: string): void {
       release()
     }
   }
-}
-
-/** Whether any (scope, session) turn lease is still holding a live turn. */
-function hasActiveTurnLeasesForScope(scope: string): boolean {
-  const prefix = `${scope}\u0000`
-  for (const key of g.turnLeases.keys()) {
-    if (key.startsWith(prefix)) {
-      return true
-    }
-  }
-  return false
 }
 
 /**
