@@ -154,7 +154,14 @@ function rowsByPinId(rows: readonly SessionInfo[]): Map<string, SessionInfo> {
 function writePin(id: string, pinned: boolean, profile?: null | string): Promise<void> {
   unconfirmed.set(id, { at: Date.now(), value: pinned })
 
-  return setSessionPinnedRemote(id, pinned, profile).then(
+  // Route to the row's OWNING connection when tagged. On the multi-gateway
+  // web fleet the active tab's connection is not necessarily the backend
+  // that owns this session — an ambient-routed PATCH would silently miss the
+  // real owner, which then re-adopts the pin on the next device/pull.
+  const row = loadedRowFor(id)
+  const connectionId = row?.connection_id?.trim() || undefined
+
+  return setSessionPinnedRemote(id, pinned, profile, connectionId).then(
     () => {
       // Deliberately NOT cleared here: a list request issued before this PATCH
       // can still land after the ack carrying the pre-write value. The guard
