@@ -1614,6 +1614,211 @@ patchFile(
 }`,
 )
 
+// --- store/gateway.ts: turn-lease survival on socket close (#1/#2) ----------
+// Upstream releases EVERY turn lease for a scope when its socket closes; on a
+// page refresh that hands the backend an orphan it interrupts as client_gone
+// (running turn dies ~4s after refresh / reconnect storm). Web port: only
+// drop leases with NO active turn in flight — a mid-turn lease must survive
+// the transport blip and re-attach on redial. Sync 890eba9 reverted this;
+// re-asserted here so it survives upstream syncs.
+patchFile(
+  'store/gateway.ts',
+  'Only drop leases that have NO active turn in flight',
+  `    } else if (state === 'closed' || state === 'error') {
+      // A dead socket cannot emit the terminal event that normally releases
+      // its turn lease. Drop the orphaned lease before deciding whether this
+      // route is still retained/active enough to reconnect.
+      releaseTurnLeasesForScope(scope)
+
+      if (entry.wantOpen) {`,
+  `    } else if (state === 'closed' || state === 'error') {
+      // A dead socket cannot emit the terminal event that normally releases
+      // its turn lease. BUT a mid-turn lease must survive a transport blip:
+      // the gateway keeps the running turn alive past a detach (it only
+      // interrupts after its own orphan grace) and the reconnected socket
+      // re-attaches to the same runtime session. Releasing here violates the
+      // "hold until message.complete/session.info settles the turn" contract
+      // and hands the backend an orphan it will interrupt as client_gone
+      // within seconds — which is exactly the refresh-kills-the-turn bug.
+      // Only drop leases that have NO active turn in flight (route-level
+      // holds are tracked separately by activeRequests).
+      if (!hasActiveTurnLeasesForScope(scope)) {
+        releaseTurnLeasesForScope(scope)
+      }
+
+      if (entry.wantOpen) {`,
+)
+
+// --- store/gateway.ts: hasActiveTurnLeasesForScope helper -------------------
+// Companion to the lease-survival patch above: the guard needs the helper.
+// Upstream lacks the function entirely; add it after releaseTurnLeasesForScope.
+patchFile(
+  'store/gateway.ts',
+  'function hasActiveTurnLeasesForScope(scope: string): boolean',
+  `  for (const [key, release] of [...g.turnLeases]) {
+    if (key.startsWith(prefix)) {
+      release()
+    }
+  }
+}`,
+  `  for (const [key, release] of [...g.turnLeases]) {
+    if (key.startsWith(prefix)) {
+      release()
+    }
+  }
+}
+
+// True when \`scope\` holds at least one in-flight TURN lease (as opposed to
+// route-level holds tracked by activeRequests). The socket-closed handler
+// consults this before releasing: a mid-turn lease must survive a transport
+// blip (the backend keeps the running turn alive past detach and the
+// reconnected socket re-attaches), so only lease-less scopes release.
+function hasActiveTurnLeasesForScope(scope: string): boolean {
+  const prefix = \`\${scope}\\u0000\`
+  for (const key of g.turnLeases.keys()) {
+    if (key.startsWith(prefix)) {
+      return true
+    }
+  }
+  return false
+}`,
+)
+
+// --- api/sessions.ts: setSessionPinnedRemote routes to owning connection ----
+// Upstream PATCHes the ambient/active gateway only. Under registry topology
+// (multi-gateway web fleet) a session's row is tagged with its REAL owning
+// connection, which can differ from the active tab's — an ambient unpin then
+// misses the true owner, which keeps pinned=true and re-adopts on the next
+// device/pull. Sync 890eba9 reverted this; re-asserted here.
+patchFile(
+  'api/sessions.ts',
+  'Route to the owning CONNECTION, not the ambient active one',
+  `export function setSessionPinnedRemote(id: string, pinned: boolean, profile?: string | null): Promise<{ ok: boolean }> {
+  // Owning profile in the PATCH body (see setSessionArchived / renameSession):
+  // the handler reads its target DB from body.profile, so a remote/foreign
+  // profile's pin must travel in the body or it no-ops on the wrong state.db.
+  return hermesApi<{ ok: boolean }>({
+    ...(profile ? { profile } : {}),
+    path: \`/api/sessions/\${encodeURIComponent(id)}\`,
+    method: 'PATCH',
+    body: { pinned, ...(profile ? { profile } : {}) }
+  })
+}`,
+  `export function setSessionPinnedRemote(
+  id: string,
+  pinned: boolean,
+  profile?: string | null,
+  connectionId?: null | string
+): Promise<{ ok: boolean }> {
+  // Owning profile in the PATCH body (see setSessionArchived / renameSession):
+  // the handler reads its target DB from body.profile, so a remote/foreign
+  // profile's pin must travel in the body or it no-ops on the wrong state.db.
+  return hermesApi<{ ok: boolean }>({
+    ...(profile ? { profile } : {}),
+    // Route to the owning CONNECTION, not the ambient active one. Under
+    // registry topology (multi-gateway web fleet) an unpin PATCHed to the
+    // active gateway while the session lives on another registered backend
+    // silently misses — the real owner keeps pinned=true and re-adopts the
+    // pin on the next device / pull. A request-level connectionId overrides
+    // connectionScoped()'s ambient tag in hermesApi.
+    ...(connectionId ? { connectionId } : {}),
+    path: \`/api/sessions/\${encodeURIComponent(id)}\`,
+    method: 'PATCH',
+    body: { pinned, ...(profile ? { profile } : {}) }
+  })
+}`,
+)
+
+// --- store/session-pin-sync.ts: writePin threads the row's owning connection -
+// Same root cause as above: the pin PATCH must reach the backend that owns
+// the session's row, not the ambient active gateway. Sync 890eba9 reverted
+// this; re-asserted here.
+patchFile(
+  'store/session-pin-sync.ts',
+  "Route to the row's OWNING connection when tagged",
+  `  unconfirmed.set(id, { at: Date.now(), value: pinned })
+
+  return setSessionPinnedRemote(id, pinned, profile).then(`,
+  `  unconfirmed.set(id, { at: Date.now(), value: pinned })
+
+  // Route to the row's OWNING connection when tagged. On the multi-gateway
+  // web fleet the active tab's connection is not necessarily the backend
+  // that owns this session — an ambient-routed PATCH would silently miss the
+  // real owner, which then re-adopts the pin on the next device/pull.
+  const row = loadedRowFor(id)
+  const connectionId = row?.connection_id?.trim() || undefined
+
+  return setSessionPinnedRemote(id, pinned, profile, connectionId).then(`,
+)
+
+// --- store/session-actions utils.ts: resolveStoredSession cross-connection --
+// Upstream's live owner ladder (cache → active profile → other profiles)
+// never probes OTHER registered connections. Under registry topology a
+// session can live on a different gateway than the active tab's connection
+// (multi-container web fleet) — opening it threw SessionOwnerResolutionError
+// ("couldn't open this session") instead of routing to its real owner. The
+// read-only recovery path probes connections; the live ladder must too.
+// Sync 890eba9 reverted this; re-asserted here.
+patchFile(
+  'app/session/hooks/use-session-actions/utils.ts',
+  "Cross-CONNECTION rung",
+  `    } catch {
+      // Not on this profile; try the next.
+    }
+  }
+
+  return undefined
+}`,
+  `    } catch {
+      // Not on this profile; try the next.
+    }
+  }
+
+  // Cross-CONNECTION rung: the profile probes above only cover the CURRENT
+  // connection's profiles. Under registry topology a session can live on a
+  // DIFFERENT registered gateway (the 4-container web fleet: each tab is
+  // bound to one connection, but the session list is shared) — the read-only
+  // transcript recovery probes those backends, but the live owner ladder did
+  // not, so opening such a session threw SessionOwnerResolutionError
+  // ("couldn't open this session") instead of routing to its real owner.
+  // Mirror the read-only probe: try each registered NON-local connection by
+  // id (one cheap by-id lookup each), and on a hit stamp the row with the
+  // owning connection so every later session-scoped RPC routes to it.
+  const { $connectionsRegistry } = await import('@/store/connection-registry-state')
+  const { getApiRequestConnection } = await import('@/api/client')
+
+  const connections = ($connectionsRegistry.get()?.connections ?? []) as Array<{ id?: string }>
+  const currentConnection = getApiRequestConnection()?.trim()
+
+  for (const connection of connections) {
+    const connectionId = connection.id?.trim()
+
+    if (!connectionId || connectionId === 'local' || connectionId === currentConnection) {
+      continue
+    }
+
+    try {
+      const session = await getSession(storedSessionId, { connectionId, profile: 'default' })
+
+      // The DESKTOP connection that answered is authoritative — the remote
+      // backend answers as its own "default", but the row belongs to this
+      // registry entry (the same ownership contract the profile probes use).
+      session.connection_id = connectionId
+      session.profile = normalizeProfileKey(session.profile || 'default')
+
+      upsertResolvedSession(session, storedSessionId)
+
+      return session
+    } catch {
+      // Not on this backend (or it is unreachable); try the next.
+    }
+  }
+
+  return undefined
+}`,
+)
+
+
 if (touched === 0) {
   console.log('no patches applied (all present)')
 } else {
