@@ -728,9 +728,18 @@ function createSecondary(profile: string, connectionId: null | string = null): S
       clearTimer(entry)
     } else if (state === 'closed' || state === 'error') {
       // A dead socket cannot emit the terminal event that normally releases
-      // its turn lease. Drop the orphaned lease before deciding whether this
-      // route is still retained/active enough to reconnect.
-      releaseTurnLeasesForScope(scope)
+      // its turn lease. BUT a mid-turn lease must survive a transport blip:
+      // the gateway keeps the running turn alive past a detach (it only
+      // interrupts after its own orphan grace) and the reconnected socket
+      // re-attaches to the same runtime session. Releasing here violates the
+      // "hold until message.complete/session.info settles the turn" contract
+      // and hands the backend an orphan it will interrupt as `client_gone`
+      // within seconds — which is exactly the refresh-kills-the-turn bug.
+      // Only drop leases that have NO active turn in flight (route-level
+      // holds are tracked separately by activeRequests).
+      if (!hasActiveTurnLeasesForScope(scope)) {
+        releaseTurnLeasesForScope(scope)
+      }
 
       if (entry.wantOpen) {
         scheduleReconnect(entry)
@@ -1179,6 +1188,16 @@ function cancelTurnLeaseRelease(key: string): void {
     clearTimeout(timer)
     g.turnLeaseReleaseTimers.delete(key)
   }
+}
+
+function hasActiveTurnLeasesForScope(scope: string): boolean {
+  const prefix = `${scope}\u0000`
+  for (const key of g.turnLeases.keys()) {
+    if (key.startsWith(prefix)) {
+      return true
+    }
+  }
+  return false
 }
 
 function releaseTurnLeasesForScope(scope: string): void {

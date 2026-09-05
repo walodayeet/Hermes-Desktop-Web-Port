@@ -997,15 +997,19 @@ export function startUpdatePoller(): void {
 
   const bridge = window.hermesDesktop?.updates
 
-  if (!bridge) {
-    return
-  }
-
+  // Desktop self-update needs the Electron bridge. The BACKEND check does
+  // not — it's a gateway RPC (checkHermesUpdate) and the web port is always
+  // remote-mode, so gate only the client half on the bridge, not the whole
+  // poller. Without this the web port never polls for backend updates until
+  // something else happens to flip $connection.mode.
   pollerStarted = true
-  void checkUpdates()
   void checkBackendUpdates()
   void refreshDesktopVersion()
-  bridge.onProgress(ingestProgress)
+
+  if (bridge) {
+    void checkUpdates()
+    bridge.onProgress(ingestProgress)
+  }
 
   // The poller starts at mount, before the gateway connects — so the first
   // backend check above sees mode≠remote and no-ops. Re-check once the
@@ -1025,8 +1029,11 @@ export function startUpdatePoller(): void {
   window.addEventListener('focus', onFocus)
   backgroundTimer = setInterval(
     () => {
-      void checkUpdates()
       void checkBackendUpdates()
+
+      if (bridge) {
+        void checkUpdates()
+      }
     },
     30 * 60 * 1000
   )
