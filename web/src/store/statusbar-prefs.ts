@@ -23,7 +23,8 @@ export const STATUSBAR_HIDDEN_BY_DEFAULT: readonly string[] = [
   'agents',
   'approval-mode',
   'cache-hit-rate',
-  'context-usage',
+  // 'context-usage' removed in the web port: the context meter is one of the
+  // few status readouts the user asked to always see.
   'cron',
   'running-timer',
   'session-timer',

@@ -57,11 +57,11 @@ export function useContextBreakdown({ busy, enabled, requestGateway, sessionId }
   }, [busy, enabled, requestGateway, sessionId])
 
   return {
-    // Keep the last VALID breakdown around so a session switch / mid-turn
-    // gap doesn't blank the statusbar gauge while a refetch is in flight.
-    // The breakdown is keyed to the session it describes, but the gauge's
-    // fallback (`currentUsage`) is session-agnostic — showing the previous
-    // session's numbers for one frame is better than showing nothing.
+    // Web port: keep the last VALID breakdown while a refetch is in flight —
+    // a session switch / mid-turn gap must not blank the statusbar gauge.
+    // Stale only until the refetch lands; the gauge's fallback is
+    // session-agnostic, so one frame of the previous session's numbers is
+    // better than showing nothing.
     breakdown: fetched ? fetched.breakdown : null,
     loading
   }

@@ -733,7 +733,7 @@ function createSecondary(profile: string, connectionId: null | string = null): S
       // interrupts after its own orphan grace) and the reconnected socket
       // re-attaches to the same runtime session. Releasing here violates the
       // "hold until message.complete/session.info settles the turn" contract
-      // and hands the backend an orphan it will interrupt as `client_gone`
+      // and hands the backend an orphan it will interrupt as client_gone
       // within seconds — which is exactly the refresh-kills-the-turn bug.
       // Only drop leases that have NO active turn in flight (route-level
       // holds are tracked separately by activeRequests).
@@ -1190,16 +1190,6 @@ function cancelTurnLeaseRelease(key: string): void {
   }
 }
 
-function hasActiveTurnLeasesForScope(scope: string): boolean {
-  const prefix = `${scope}\u0000`
-  for (const key of g.turnLeases.keys()) {
-    if (key.startsWith(prefix)) {
-      return true
-    }
-  }
-  return false
-}
-
 function releaseTurnLeasesForScope(scope: string): void {
   const prefix = `${scope}\u0000`
 
@@ -1215,6 +1205,21 @@ function releaseTurnLeasesForScope(scope: string): void {
       release()
     }
   }
+}
+
+// True when `scope` holds at least one in-flight TURN lease (as opposed to
+// route-level holds tracked by activeRequests). The socket-closed handler
+// consults this before releasing: a mid-turn lease must survive a transport
+// blip (the backend keeps the running turn alive past detach and the
+// reconnected socket re-attaches), so only lease-less scopes release.
+function hasActiveTurnLeasesForScope(scope: string): boolean {
+  const prefix = `${scope}\u0000`
+  for (const key of g.turnLeases.keys()) {
+    if (key.startsWith(prefix)) {
+      return true
+    }
+  }
+  return false
 }
 
 /**

@@ -365,6 +365,65 @@ patchFile(
     notifyError(err, translateNow('commandCenter.gatewayRestartFailed'))`,
 )
 
+// --- store/updates.ts: backend update check is bridge-independent -------------
+// Web bug #7: startUpdatePoller early-returned whenever the Electron updates
+// bridge was absent, so on web (no bridge) the backend "update available"
+// signal was NEVER polled — a stale-gateway banner only a desktop client
+// could trigger. Upstream gates the WHOLE poller on the bridge; the backend
+// check (checkBackendUpdates/checkHermesUpdate) is a gateway RPC and must
+// always run. Only the client self-update half stays bridge-gated. Clobbered
+// by the 2026-09 sync; re-asserted as marker-guarded entries.
+patchFile(
+  'store/updates.ts',
+  'Web port: gate only the client self-update half on the bridge',
+  `  const bridge = window.hermesDesktop?.updates
+
+  if (!bridge) {
+    return
+  }
+
+  pollerStarted = true
+  void checkUpdates()
+  void checkBackendUpdates()
+  void refreshDesktopVersion()
+  bridge.onProgress(ingestProgress)`,
+  `  const bridge = window.hermesDesktop?.updates
+
+  // Web port: gate only the client self-update half on the bridge, not the
+  // whole poller. Desktop self-update needs the Electron bridge; the BACKEND
+  // check does not — checkHermesUpdate is a gateway RPC and the web port is
+  // always remote-mode, so the poller must run (and poll the backend) even
+  // with no updates bridge.
+  pollerStarted = true
+  void checkBackendUpdates()
+  void refreshDesktopVersion()
+
+  if (bridge) {
+    void checkUpdates()
+    bridge.onProgress(ingestProgress)
+  }`,
+)
+// The 30-minute interval has the same shape: the backend check always runs;
+// only the client self-update call is bridge-gated.
+patchFile(
+  'store/updates.ts',
+  'Web port: interval bridge-gates only the client self-update call',
+  `    () => {
+      void checkUpdates()
+      void checkBackendUpdates()
+    },
+    30 * 60 * 1000`,
+  `    () => {
+      void checkBackendUpdates()
+
+      if (bridge) {
+        // Web port: interval bridge-gates only the client self-update call.
+        void checkUpdates()
+      }
+    },
+    30 * 60 * 1000`,
+)
+
 // --- use-prompt-actions/index.ts: web-input paths always upload bytes ----------------
 patchFile(
   'app/session/hooks/use-prompt-actions/index.ts',
@@ -382,14 +441,43 @@ patchFile(
 // ONE atomic edit: replace the `'context-usage',` entry with the explanatory
 // comment, so the meter is NOT hidden by default. Upstream ships it hidden;
 // without the removal part the next sync would silently revert the visibility.
+// (2026-09 re-anchor: upstream alphabetized the hidden list — 'cache-hit-rate'
+// now sits between 'approval-mode' and 'context-usage'.)
 patchFile(
   'store/statusbar-prefs.ts',
   'removed in the web port: the context meter',
-  `'approval-mode',
+  `'cache-hit-rate',
   'context-usage',`,
-  `'approval-mode',
+  `'cache-hit-rate',
   // 'context-usage' removed in the web port: the context meter is one of the
   // few status readouts the user asked to always see.`,
+)
+
+// --- app/shell/hooks/use-context-breakdown.ts: keep last valid breakdown -----
+// Web bug #4 (statusbar context meter): upstream keys the held breakdown to
+// the session it describes and returns null the instant the focused session
+// changes (or the effect early-returns mid-turn), blanking the meter while a
+// refetch is in flight. Web port keeps the last VALID breakdown until the
+// refetch lands — the gauge's fallback is session-agnostic, and one frame of
+// the previous session's numbers beats an empty gauge. Clobbered by the
+// 2026-09 sync (upstream rewrote the return to key on fetched.sessionId);
+// re-asserted as a marker-guarded entry.
+patchFile(
+  'app/shell/hooks/use-context-breakdown.ts',
+  'Web port: keep the last VALID breakdown while a refetch is in flight',
+  `  return {
+    breakdown: fetched && fetched.sessionId === sessionId ? fetched.breakdown : null,
+    loading
+  }`,
+  `  return {
+    // Web port: keep the last VALID breakdown while a refetch is in flight —
+    // a session switch / mid-turn gap must not blank the statusbar gauge.
+    // Stale only until the refetch lands; the gauge's fallback is
+    // session-agnostic, so one frame of the previous session's numbers is
+    // better than showing nothing.
+    breakdown: fetched ? fetched.breakdown : null,
+    loading
+  }`,
 )
 
 // --- controller.tsx: shell uses dvh (iOS dynamic viewport height) ---------------------
