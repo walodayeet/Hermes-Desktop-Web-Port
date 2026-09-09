@@ -989,6 +989,17 @@ export function installWebBridge(): void {
     oauthLoginConnectionConfig: async (url: string) => {
       const baseUrl = String(url || '').trim()
       if (!baseUrl) return { ok: false, baseUrl: '', connected: false }
+
+      // Popup-blocker-safe open: create the window SYNCHRONOUSLY (before any
+      // await) so the browser attributes it to the user's click gesture. Point
+      // it at about:blank first, then navigate once begin() resolves — a
+      // window.open to the real URL after an await is what popup blockers
+      // silently reject.
+      const win = window.open('about:blank', '_blank')
+      if (!win) {
+        return { ok: false, baseUrl, connected: false, error: 'popup_blocked' }
+      }
+
       try {
         // URL goes in the PATH (encodeURIComponent keeps it one segment;
         // the relay resolves it via findByUrl). The legacy gateway-settings
@@ -998,18 +1009,55 @@ export function installWebBridge(): void {
           { method: 'POST', body: JSON.stringify({}) },
         )
         if (!result.ok || !result.authorizeUrl) {
+          win.close()
           return {
             ok: false,
             baseUrl,
             connected: false,
-            error: result.error === 'native_pkce_unavailable' ? 'native_pkce_unavailable' : undefined,
+            error: result.error,
           }
         }
-        // Open the gateway's authorize URL so the user can sign in; the
-        // proxy relays the loopback exchange asynchronously.
-        window.open(result.authorizeUrl, '_blank', 'noopener')
-        return { ok: true, baseUrl, connected: false }
+
+        // Navigate the already-open window to the gateway authorize URL. A
+        // second window.open here would re-trigger the popup blocker.
+        win.location.href = result.authorizeUrl
+
+        // Poll the proxy relay for completion. The relay keys oauth status by
+        // connection id OR gateway URL (resolveConnection), so polling
+        // <baseUrl>/oauth/status is correct even before a connection id exists.
+        const POLL_INTERVAL_MS = 1500
+        const HARD_TIMEOUT_MS = 5 * 60 * 1000
+        const deadline = Date.now() + HARD_TIMEOUT_MS
+
+        while (true) {
+          // Short per-call timeout so a slow proxy doesn't wedge the poll.
+          let status: { connected: boolean; expiresAt: number | null; provider: string | null } | null = null
+          try {
+            status = await fetchJson<{ connected: boolean; expiresAt: number | null; provider: string | null }>(
+              `${CONNECTIONS_DOOR}/${encodeURIComponent(baseUrl)}/oauth/status`,
+              undefined,
+              8000,
+            )
+          } catch {
+            // Transient status fetch error — ignore and keep polling.
+          }
+
+          if (status?.connected) {
+            if (!win.closed) win.close()
+            return { ok: true, baseUrl, connected: true }
+          }
+          if (win.closed) {
+            return { ok: true, baseUrl, connected: false }
+          }
+          if (Date.now() >= deadline) {
+            win.close()
+            return { ok: false, baseUrl, connected: false, error: 'oauth_timeout' }
+          }
+
+          await new Promise((resolve) => window.setTimeout(resolve, POLL_INTERVAL_MS))
+        }
       } catch {
+        if (!win.closed) win.close()
         return { ok: false, baseUrl, connected: false }
       }
     },
