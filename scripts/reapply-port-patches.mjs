@@ -1108,10 +1108,17 @@ patchFile(
 // guard, the PATCH was never sent, and the pull pass un-pinned it right back
 // (localStorage showed pinned, server never learned → pin "doesn't work").
 // Gated on bootReconcilePassed: boot replay is blocked, live clicks flow.
+//
+// 2026-09-10: narrowed further — the guard may only swallow pins this page
+// INHERITED from the previous page/device (bootLocal). A live user toggle
+// during the boot window (pin clicked before the first server list arrived)
+// must reach writePin even while its row still reports pinned=false, or the
+// fresh pin is marked mirrored without a PATCH and the pull pass reverts it.
+// bootLocal is declared + snapshotted by the subsequent patches.
 // The flag is declared + closed by the two subsequent patches.
 patchFile(
   'store/session-pin-sync.ts',
-  'row.pinned === false && !bootReconcilePassed',
+  'bootLocal.has(id) && !bootReconcilePassed',
   `    pending.delete(id)
     mirrored.add(id)
     void writePin(id, true, row.profile).catch(() => {`,
@@ -1124,12 +1131,14 @@ patchFile(
     // below drops the stale local copy instead.
     //
     // The guard only fires inside the BOOT replay window (before the first
-    // server-backed session list arrives). A live user pin on a row the
-    // server still reports pinned=false MUST reach writePin — skipping it
-    // silently drops the fresh pin (localStorage shows it, the server never
-    // learns, and the pull pass un-pins it right back). Re-anchored for the
-    // 2026-08-27 upstream sync that dropped the guard.
-    if (row.pinned === false && !bootReconcilePassed) {
+    // server-backed session list arrives), and only for pins this page
+    // INHERITED (bootLocal). A live user pin on a row the server still
+    // reports pinned=false MUST reach writePin — skipping it silently drops
+    // the fresh pin (localStorage shows it, the server never learns, and the
+    // pull pass un-pins it right back). Re-anchored for the 2026-08-27
+    // upstream sync that dropped the guard; narrowed to bootLocal so a live
+    // toggle during the boot window is never swallowed.
+    if (row.pinned === false && bootLocal.has(id) && !bootReconcilePassed) {
       continue
     }
 
@@ -1906,6 +1915,199 @@ patchFile(
 }`,
 )
 
+
+// --- app/settings/pool-limits-setting.tsx: bounds from a local const ---------
+// Upstream imports POOL_LIMITS_BOUNDS from the Electron MAIN-process module
+// (apps/desktop/electron/pool-limits.ts). This repo syncs apps/desktop/src
+// only — the module never exists here and the bare import fails tsc (TS2307).
+// The web port inlines the constants in lockstep with main's clamp. This
+// direct edit was first stripped by the 2026-09-10 sync (267a6b79c8);
+// re-asserted here as a marker-guarded entry.
+patchFile(
+  'app/settings/pool-limits-setting.tsx',
+  'Web port: bounds for the pool knobs',
+  `// Bounds imported from main's clamp module so the advertised input ranges
+// can never drift from what the pool actually enforces (review note on #92581).
+import { POOL_LIMITS_BOUNDS } from '../../../electron/pool-limits'
+
+const MAX_BACKENDS_MAX = POOL_LIMITS_BOUNDS.maxBackendsMax
+const IDLE_MS_MAX = POOL_LIMITS_BOUNDS.idleMsMax`,
+  `// Web port: bounds for the pool knobs. Upstream imports them from the
+// Electron main's clamp module (apps/desktop/electron/pool-limits.ts) — a
+// directory this repo does not sync. Keep the constants in lockstep with the
+// main-process clamp that pool-limits.ts mirrors; the store's defaults (3
+// backends, 10 min idle) and the maxBackends cap are what the Settings rows
+// advertise. Changing these requires a matching change on the Electron side.
+const POOL_LIMITS_BOUNDS = {
+  maxBackendsMax: 64,
+  /** 7 days, matching the UI's suggestion ceiling. */
+  idleMsMax: 7 * 24 * 60 * 60_000
+} as const
+
+const MAX_BACKENDS_MAX = POOL_LIMITS_BOUNDS.maxBackendsMax
+const IDLE_MS_MAX = POOL_LIMITS_BOUNDS.idleMsMax`,
+)
+
+// --- store/session-pin-sync.ts: bootLocal — live pins always reach writePin ---
+// Root cause ("session pin / unpin does not persist"): two bookkeeping gaps in
+// the sync module let a local→server intent transition go un-PATCHed, and a
+// stale page then reverts the user's action:
+//   1. The flush pass marked a pin mirrored and skipped the PATCH when its
+//      row reported pinned=false during the boot window — but that skip also
+//      swallowed LIVE user pins clicked before the first server list arrived,
+//      and the pull pass below un-pinned them right back (test (a), RED).
+//      The never-reassert guard now applies ONLY to pins the page INHERITED
+//      (bootLocal); live toggles always flow.
+//   2. The unpin pass only iterated mirrored ∪ pending ∪ deselected. A pin
+//      present in localStorage but never mirrored (bookkeeping cleared by a
+//      connection rescope / resetSessionPinMirror) received no PATCH on
+//      unpin, and the next pinned:true page re-adopted it (test (b), RED).
+//      bootLocal feeds the unpin pass too, so every local→server intent
+//      transition writes. bootLocal is intentionally NOT cleared by
+//      resetSessionPinMirror (the inherited-pin provenance survives a scope
+//      change; the new backend gets the unpin instead of a silent swallow).
+// Boot-inherited snapshot: taken in watchSessionPins (declared alongside the
+// boot-replay flag below).
+patchFile(
+  'store/session-pin-sync.ts',
+  'let bootLocal = new Set<string>()',
+  `let bootReconcilePassed = false
+
+function reconcile(): void {`,
+  `let bootReconcilePassed = false
+
+// Pins this page INHERITED from the previous page/device (the localStorage
+// set when the watcher started). The never-reassert boot guard may only ever
+// swallow THESE — a pin added to the local set after this snapshot is a LIVE
+// user toggle and must always reach writePin, even while its row still
+// reports the pre-PATCH pinned=false. Also feeds the unpin pass: a pin that
+// was local at boot but never mirrored this page (bookkeeping cleared by a
+// connection rescope / resetSessionPinMirror) must still PATCH on unpin, or
+// the next stale pinned:true page re-adopts it.
+let bootLocal = new Set<string>()
+
+function reconcile(): void {`,
+)
+patchFile(
+  'store/session-pin-sync.ts',
+  'bootLocal = new Set($pinnedSessionIds.get())',
+  `  onConnectionScopeChange(resetSessionPinMirror)
+  reconcile()`,
+  `  onConnectionScopeChange(resetSessionPinMirror)
+  // Snapshot the pins this page INHERITED from localStorage (the previous
+  // page / device) before the first reconcile. The boot-replay guard may
+  // only block these; a pin added after this line is a live user action and
+  // must always reach writePin.
+  bootLocal = new Set($pinnedSessionIds.get())
+  reconcile()`,
+)
+patchFile(
+  'store/session-pin-sync.ts',
+  'Web port (mobile): a pin present in localStorage but',
+  `  // Unpinned: anything we were tracking that's no longer in the set.
+  for (const id of [...new Set([...mirrored, ...pending, ...deselected])]) {
+    if (!current.has(id)) {
+      mirrored.delete(id)
+      pending.delete(id)
+      deselected.add(id)
+      saveDeselected()`,
+  `  // Unpinned: anything we were tracking that's no longer in the set. Also any
+  // pin this page INHERITED (bootLocal) — a pin present in localStorage but
+  // never mirrored this page (e.g. bookkeeping cleared by a connection
+  // rescope) must still PATCH, or a stale pinned:true page re-adopts it
+  // ("unpin does not survive").
+  for (const id of [...new Set([...mirrored, ...pending, ...deselected, ...bootLocal])]) {
+    if (!current.has(id)) {
+      mirrored.delete(id)
+      pending.delete(id)
+      bootLocal.delete(id)
+      deselected.add(id)
+      saveDeselected()`,
+)
+patchFile(
+  'store/session-pin-sync.ts',
+  'bootLocal.delete(pinId)',
+  `      mirrored.delete(pinId)
+      mirrored.delete(row.id)
+      unpinSession(local.has(pinId) ? pinId : row.id)`,
+  `      mirrored.delete(pinId)
+      mirrored.delete(row.id)
+      bootLocal.delete(pinId)
+      bootLocal.delete(row.id)
+      unpinSession(local.has(pinId) ? pinId : row.id)`,
+)
+
+// --- components/ui/copy-button.tsx: empty copy payload must surface ---------
+// "Copy ID does nothing, no toast": copy() had a silent `if (!value) return`
+// before the clipboard call — when the menu item's sessionId failed to
+// resolve (''), the click no-op'd with no error and an empty clipboard. An
+// empty/undefined payload now throws into the component's existing error path
+// (status → error icon + onCopyError → the caller's notifyError toast).
+patchFile(
+  'components/ui/copy-button.tsx',
+  'Web port: an empty/undefined copy payload must NOT be a silent',
+  `        const value = typeof text === 'function' ? await text() : text
+
+        if (!value) {
+          return
+        }`,
+  `        const value = typeof text === 'function' ? await text() : text
+
+        if (!value) {
+          // Web port: an empty/undefined copy payload must NOT be a silent
+          // no-op — the copied id may have failed to resolve, and the click
+          // has to be loud (onCopyError → the caller's notifyError toast),
+          // or "Copy ID" appears to do nothing with no error at all.
+          throw new Error('Nothing to copy')
+        }`,
+)
+
+// --- app/chat/index.tsx: header Copy ID always resolves to a session id -----
+// ChatHeader rendered the SessionActionsMenu with only selected/active ids;
+// a ROUTED view (routeSessionId is the session on screen) can render with
+// both empty, and the Copy ID item then passed sessionId='' — disabled
+// (Radix never fires onSelect) or, upstream of that, an enabled-but-empty
+// payload. Thread the routed id through and fall back selected → active →
+// routed so an open session always has a resolvable copy target.
+patchFile(
+  'app/chat/index.tsx',
+  'routedSessionId: null | string',
+  `  onToggleSelectedPin: () => void
+  selectedSessionId: null | string
+}`,
+  `  onToggleSelectedPin: () => void
+  routedSessionId: null | string
+  selectedSessionId: null | string
+}`,
+)
+patchFile(
+  'app/chat/index.tsx',
+  '  routedSessionId,\n  selectedSessionId\n}: ChatHeaderProps) {',
+  `  onToggleSelectedPin,
+  selectedSessionId
+}: ChatHeaderProps) {`,
+  `  onToggleSelectedPin,
+  routedSessionId,
+  selectedSessionId
+}: ChatHeaderProps) {`,
+)
+patchFile(
+  'app/chat/index.tsx',
+  'routedSessionId={routedSessionId}',
+  `          onToggleSelectedPin={onToggleSelectedPin}
+          selectedSessionId={selectedSessionId}
+        />`,
+  `          onToggleSelectedPin={onToggleSelectedPin}
+          routedSessionId={routedSessionId}
+          selectedSessionId={selectedSessionId}
+        />`,
+)
+patchFile(
+  'app/chat/index.tsx',
+  "sessionId={selectedSessionId || activeSessionId || routedSessionId || ''}",
+  `sessionId={selectedSessionId || activeSessionId || ''}`,
+  `sessionId={selectedSessionId || activeSessionId || routedSessionId || ''}`,
+)
 
 if (touched === 0) {
   console.log('no patches applied (all present)')

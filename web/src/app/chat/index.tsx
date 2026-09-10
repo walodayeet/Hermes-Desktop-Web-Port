@@ -117,6 +117,7 @@ interface ChatHeaderProps {
   isRoutedSessionView: boolean
   onDeleteSelectedSession: () => void
   onToggleSelectedPin: () => void
+  routedSessionId: null | string
   selectedSessionId: null | string
 }
 
@@ -125,6 +126,7 @@ function ChatHeader({
   isRoutedSessionView,
   onDeleteSelectedSession,
   onToggleSelectedPin,
+  routedSessionId,
   selectedSessionId
 }: ChatHeaderProps) {
   const sessions = useStore($sessions)
@@ -172,7 +174,7 @@ function ChatHeader({
           onDelete={selectedSessionId ? onDeleteSelectedSession : undefined}
           onPin={selectedSessionId ? onToggleSelectedPin : undefined}
           pinned={selectedIsPinned}
-          sessionId={selectedSessionId || activeSessionId || ''}
+          sessionId={selectedSessionId || activeSessionId || routedSessionId || ''}
           sideOffset={8}
           title={title}
         >
@@ -663,6 +665,7 @@ const ChatViewContent = memo(function ChatViewContent({
           isRoutedSessionView={isRoutedSessionView}
           onDeleteSelectedSession={onDeleteSelectedSession}
           onToggleSelectedPin={onToggleSelectedPin}
+          routedSessionId={routedSessionId}
           selectedSessionId={selectedSessionId}
         />
       )}

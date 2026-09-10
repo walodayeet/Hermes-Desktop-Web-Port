@@ -109,7 +109,11 @@ export function CopyButton({
         const value = typeof text === 'function' ? await text() : text
 
         if (!value) {
-          return
+          // Web port: an empty/undefined copy payload must NOT be a silent
+          // no-op — the copied id may have failed to resolve, and the click
+          // has to be loud (onCopyError → the caller's notifyError toast),
+          // or "Copy ID" appears to do nothing with no error at all.
+          throw new Error('Nothing to copy')
         }
 
         await writeClipboardText(value)

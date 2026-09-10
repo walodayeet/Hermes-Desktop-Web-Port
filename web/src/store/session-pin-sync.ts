@@ -247,6 +247,8 @@ function pullRemotePins(): void {
       // reconcile runs, or it re-PATCHes pinned=false the server already has.
       mirrored.delete(pinId)
       mirrored.delete(row.id)
+      bootLocal.delete(pinId)
+      bootLocal.delete(row.id)
       unpinSession(local.has(pinId) ? pinId : row.id)
     }
   }
@@ -267,6 +269,16 @@ let reconciling = false
 // that, live pins must always reach writePin even when rows still report the
 // pre-PATCH pinned=false (the guard would otherwise swallow fresh pin clicks).
 let bootReconcilePassed = false
+
+// Pins this page INHERITED from the previous page/device (the localStorage
+// set when the watcher started). The never-reassert boot guard may only ever
+// swallow THESE — a pin added to the local set after this snapshot is a LIVE
+// user toggle and must always reach writePin, even while its row still
+// reports the pre-PATCH pinned=false. Also feeds the unpin pass: a pin that
+// was local at boot but never mirrored this page (bookkeeping cleared by a
+// connection rescope / resetSessionPinMirror) must still PATCH on unpin, or
+// the next stale pinned:true page re-adopts it.
+let bootLocal = new Set<string>()
 
 function reconcile(): void {
   if (reconciling) {
@@ -298,11 +310,16 @@ function reconcileInner(): void {
   // the still-stale row from silently reverting the user's action (#74570).
   const current = new Set($pinnedSessionIds.get())
 
-  // Unpinned: anything we were tracking that's no longer in the set.
-  for (const id of [...new Set([...mirrored, ...pending, ...deselected])]) {
+  // Unpinned: anything we were tracking that's no longer in the set. Also any
+  // pin this page INHERITED (bootLocal) — a pin present in localStorage but
+  // never mirrored this page (e.g. bookkeeping cleared by a connection
+  // rescope) must still PATCH, or a stale pinned:true page re-adopts it
+  // ("unpin does not survive").
+  for (const id of [...new Set([...mirrored, ...pending, ...deselected, ...bootLocal])]) {
     if (!current.has(id)) {
       mirrored.delete(id)
       pending.delete(id)
+      bootLocal.delete(id)
       deselected.add(id)
       saveDeselected()
       void writePin(id, false, profileFor(id)).catch(() => {
@@ -347,12 +364,14 @@ function reconcileInner(): void {
     // below drops the stale local copy instead.
     //
     // The guard only fires inside the BOOT replay window (before the first
-    // server-backed session list arrives). A live user pin on a row the
-    // server still reports pinned=false MUST reach writePin — skipping it
-    // silently drops the fresh pin (localStorage shows it, the server never
-    // learns, and the pull pass un-pins it right back). Re-anchored for the
-    // 2026-08-27 upstream sync that dropped the guard.
-    if (row.pinned === false && !bootReconcilePassed) {
+    // server-backed session list arrives), and only for pins this page
+    // INHERITED (bootLocal). A live user pin on a row the server still
+    // reports pinned=false MUST reach writePin — skipping it silently drops
+    // the fresh pin (localStorage shows it, the server never learns, and the
+    // pull pass un-pins it right back). Re-anchored for the 2026-08-27
+    // upstream sync that dropped the guard; narrowed to bootLocal so a live
+    // toggle during the boot window is never swallowed.
+    if (row.pinned === false && bootLocal.has(id) && !bootReconcilePassed) {
       continue
     }
 
@@ -378,6 +397,11 @@ export function watchSessionPins(): void {
   // storage scope; the mirrored/pending/unconfirmed bookkeeping describes
   // the PREVIOUS backend and must reset before that reload reconciles.
   onConnectionScopeChange(resetSessionPinMirror)
+  // Snapshot the pins this page INHERITED from localStorage (the previous
+  // page / device) before the first reconcile. The boot-replay guard may
+  // only block these; a pin added after this line is a live user action and
+  // must always reach writePin.
+  bootLocal = new Set($pinnedSessionIds.get())
   reconcile()
   $pinnedSessionIds.listen(reconcile)
   $sessions.listen(reconcile)
