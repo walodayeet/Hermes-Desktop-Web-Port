@@ -82,6 +82,23 @@ function buildAuthorizeUrl(baseUrl, params) {
   return `${parsed.protocol}//${parsed.host}${prefix}/auth/native/authorize?${q.toString()}`;
 }
 
+/**
+ * Normalize a bare gateway URL used as an oauth key (the add-new editor
+ * starts sign-in before the connection has a registry row). Trailing slashes
+ * are dropped so the registered row dedupes against the URL the renderer
+ * later saves; null when the key is not an http(s) URL.
+ */
+function parseGatewayKey(value) {
+  let parsed;
+  try {
+    parsed = new URL(String(value || '').trim());
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+  return { baseUrl: `${parsed.origin}${parsed.pathname.replace(/\/+$/, '')}`, label: parsed.hostname };
+}
+
 /** Gateway endpoint URL for a base URL (keeps any path prefix). */
 function endpointUrl(baseUrl, suffix) {
   const parsed = new URL(baseUrl);
@@ -247,23 +264,37 @@ function createOauthRelay(opts) {
   }
 
   /**
-   * Begin the native-PKCE relay for a connection (by id or URL).
-   * Returns { authorizeUrl, redirectUri, baseUrl }. Throws with `status` and
-   * `code: 'native_pkce_unavailable'` when the gateway doesn't advertise it.
+   * Begin the native-PKCE relay for a connection (by id or URL), or for a
+   * gateway URL that has no registry row yet (the add-new editor signs in
+   * before saving) — in that case the row is registered here, after the
+   * capability probe, so redeem() has somewhere to store the tokens.
+   * Returns { authorizeUrl, redirectUri, baseUrl, registered }. Throws with
+   * `status` and `code: 'native_pkce_unavailable'` when the gateway doesn't
+   * advertise it (no row is created).
    */
   async function begin(connKey, provider) {
     const conn = resolveConnection(connKey);
-    if (!conn) {
-      const err = new Error(`no connection for oauth key "${connKey}"`);
-      err.status = 404;
-      throw err;
+    let baseUrl;
+    // Set when the key named a gateway that has no registry row yet: the
+    // renderer signs in from the add-new editor, before the row is saved.
+    let unsaved;
+
+    if (conn) {
+      if (!conn.url) {
+        const err = new Error(`connection "${conn.label}" has no url`);
+        err.status = 400;
+        throw err;
+      }
+      baseUrl = conn.url;
+    } else {
+      unsaved = parseGatewayKey(connKey);
+      if (!unsaved) {
+        const err = new Error(`no connection for oauth key "${connKey}"`);
+        err.status = 404;
+        throw err;
+      }
+      baseUrl = unsaved.baseUrl;
     }
-    if (!conn.url) {
-      const err = new Error(`connection "${conn.label}" has no url`);
-      err.status = 400;
-      throw err;
-    }
-    const baseUrl = conn.url;
 
     // Capability gate: older gateways (no native_pkce) fall back to token
     // mode — surface a distinct error the bridge maps to the renderer.
@@ -283,6 +314,21 @@ function createOauthRelay(opts) {
       throw err;
     }
 
+    // PKCE-capable: register the row now (no junk entries for gateways that
+    // failed the probe above) so redeem() has somewhere to store the tokens.
+    let connKeyResolved = connKey;
+    let registered = false;
+    if (unsaved) {
+      const saved = store.save({
+        kind: 'remote',
+        url: baseUrl,
+        label: unsaved.label,
+        authMode: 'oauth',
+      });
+      connKeyResolved = (saved && saved.connection && saved.connection.id) || baseUrl;
+      registered = true;
+    }
+
     const pkce = generatePkcePair(randomImpl);
     const state = generateState(randomImpl);
 
@@ -294,7 +340,7 @@ function createOauthRelay(opts) {
     const port = server.address().port;
     const redirectUri = `http://127.0.0.1:${port}/callback`;
 
-    const entry = { connKey, baseUrl, verifier: pkce.verifier, redirectUri, server, timer: null };
+    const entry = { connKey: connKeyResolved, baseUrl, verifier: pkce.verifier, redirectUri, server, timer: null };
     pending.set(state, entry);
     entry.timer = setTimeout(() => expire(state), PENDING_TTL_MS);
     if (entry.timer.unref) entry.timer.unref();
@@ -305,7 +351,7 @@ function createOauthRelay(opts) {
       state,
       provider,
     });
-    return { authorizeUrl, redirectUri, baseUrl };
+    return { authorizeUrl, redirectUri, baseUrl, registered };
   }
 
   function status(connKey) {

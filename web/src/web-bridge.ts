@@ -50,6 +50,29 @@ async function fetchJson<T>(path: string, init?: RequestInit, timeoutMs = 30_000
   }
 }
 
+/** Like fetchJson, but keeps the JSON body of a non-2xx response: the
+ *  connections door reports auth-mode failures (e.g. oauth/begin on a gateway
+ *  that doesn't offer native PKCE) as `{ ok: false, error: '…' }` with a 4xx
+ *  status, and the renderer needs that code to tell the user what to do
+ *  instead. Returns null when the fetch failed or the body isn't JSON. */
+async function fetchJsonIncludingErrorBody<T>(path: string, init?: RequestInit, timeoutMs = 30_000): Promise<T | null> {
+  const ctrl = new AbortController()
+  const timer = window.setTimeout(() => ctrl.abort(), timeoutMs)
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      credentials: 'include',
+      ...init,
+      signal: ctrl.signal,
+    })
+    const text = await res.text()
+    return text ? (JSON.parse(text) as T) : null
+  } catch {
+    return null
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+
 function wsBase(): string {
   if (API_BASE) {
     const u = new URL(API_BASE)
@@ -303,7 +326,6 @@ async function mintWsUrl(profile?: null | string): Promise<string> {
 // The renderer's registry UI + routing call the proxy's /web-connections door;
 // token bytes never reach the browser (the door redacts to tokenSet/
 // tokenPreview, and the proxy injects auth on forwarded requests).
-
 const LOCAL_CONNECTION_ID = 'local'
 const CONNECTIONS_DOOR = `${API_BASE}/web-connections`
 
@@ -311,6 +333,117 @@ function isNonLocalConnection(connectionId: null | undefined | string): boolean 
   const id = String(connectionId ?? '').trim()
   return Boolean(id) && id !== LOCAL_CONNECTION_ID
 }
+
+function downloadFilename(contentDisposition: string | null, suggestedName: string | undefined, path: string): string {
+  const encoded = contentDisposition?.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded)
+    } catch {
+      return encoded
+    }
+  }
+
+  const quoted = contentDisposition?.match(/filename="([^"]+)"/i)?.[1]
+  const plain = contentDisposition?.match(/filename=([^;]+)/i)?.[1]?.trim()
+
+  return quoted || plain || suggestedName || path.split('/').pop() || 'download'
+}
+
+function dataUrlToBlob(dataUrl: string): Blob {
+  const match = dataUrl.match(/^data:([^;,]+)?(;base64)?,(.*)$/s)
+  if (!match) {
+    throw new Error('Gateway returned an invalid data URL')
+  }
+
+  const [, mime = 'application/octet-stream', encoding, data] = match
+  if (encoding) {
+    const binary = atob(data)
+    const bytes = Uint8Array.from(binary, char => char.charCodeAt(0))
+    return new Blob([bytes], { type: mime })
+  }
+
+  return new Blob([decodeURIComponent(data)], { type: mime })
+}
+
+function browserDownload(blob: Blob, filename: string): { canceled?: boolean; saved: boolean } {
+  try {
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = filename
+    anchor.style.display = 'none'
+    document.body.appendChild(anchor)
+    try {
+      anchor.click()
+    } finally {
+      anchor.remove()
+      URL.revokeObjectURL(url)
+    }
+    return { saved: true }
+  } catch {
+    return { canceled: true, saved: false }
+  }
+}
+
+async function responseError(response: Response): Promise<Error> {
+  let body = ''
+  try {
+    body = await response.text()
+  } catch {
+    // Keep status error when an error body cannot be read.
+  }
+  const suffix = body ? `: ${body}` : ''
+  return new Error(`HTTP ${response.status} ${response.statusText}${suffix}`)
+}
+
+async function saveGatewayFile(payload: {
+  connectionId?: null | string
+  path: string
+  profile?: null | string
+  sessionId?: string
+  suggestedName?: string
+}): Promise<{ canceled?: boolean; path?: string; saved: boolean }> {
+  const query = [
+    `path=${encodeURIComponent(payload.path)}`,
+    ...(payload.profile !== null && payload.profile !== undefined ? [`profile=${encodeURIComponent(payload.profile)}`] : []),
+    ...(payload.sessionId !== undefined ? [`session_id=${encodeURIComponent(payload.sessionId)}`] : [])
+  ].join('&')
+
+  const headers: Record<string, string> = {}
+  if (isNonLocalConnection(payload.connectionId)) {
+    headers['X-Hermes-Connection-Id'] = String(payload.connectionId).trim()
+  }
+  const init: RequestInit = {
+    credentials: 'include',
+    ...(Object.keys(headers).length ? { headers } : {})
+  }
+  const downloadPath = `/api/fs/download?${query}`
+  const response = await fetch(`${API_BASE}${downloadPath}`, init)
+
+  let blob: Blob
+  let contentDisposition: string | null = null
+  if (response.ok) {
+    contentDisposition = response.headers.get('Content-Disposition')
+    blob = await response.blob()
+  } else if (response.status === 404) {
+    const fallbackPath = `/api/fs/read-data-url?${query}`
+    const fallback = await fetch(`${API_BASE}${fallbackPath}`, init)
+    if (!fallback.ok) {
+      throw await responseError(fallback)
+    }
+    const result = (await fallback.json()) as { dataUrl?: unknown }
+    if (typeof result.dataUrl !== 'string') {
+      throw new Error('Gateway returned no data URL')
+    }
+    blob = dataUrlToBlob(result.dataUrl)
+  } else {
+    throw await responseError(response)
+  }
+
+  return browserDownload(blob, downloadFilename(contentDisposition, payload.suggestedName, payload.path))
+}
+
 
 /** Same-origin base the renderer can address for a remote connection. The
  *  browser NEVER talks to the remote origin directly (CORS + secret safety):
@@ -1002,19 +1135,28 @@ export function installWebBridge(): void {
 
       try {
         // URL goes in the PATH (encodeURIComponent keeps it one segment;
-        // the relay resolves it via findByUrl). The legacy gateway-settings
-        // UI operates on URL, not connection id.
-        const result = await fetchJson<{ ok: boolean; authorizeUrl?: string; baseUrl?: string; connected?: boolean; error?: string }>(
-          `${CONNECTIONS_DOOR}/${encodeURIComponent(baseUrl)}/oauth/begin`,
-          { method: 'POST', body: JSON.stringify({}) },
-        )
-        if (!result.ok || !result.authorizeUrl) {
+        // the relay resolves it by id or URL, and registers the row itself
+        // when the gateway is still unsaved). Keep the error body: the relay
+        // answers unsupported gateways with 400 + `native_pkce_unavailable`,
+        // and the caller branches on that code instead of a generic toast.
+        const result = await fetchJsonIncludingErrorBody<{
+          ok?: boolean
+          authorizeUrl?: string
+          baseUrl?: string
+          connected?: boolean
+          error?: string
+        }>(`${CONNECTIONS_DOOR}/${encodeURIComponent(baseUrl)}/oauth/begin`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        })
+        if (!result?.ok || !result.authorizeUrl) {
           win.close()
           return {
             ok: false,
             baseUrl,
             connected: false,
-            error: result.error,
+            error: result?.error || 'oauth_begin_failed',
           }
         }
 
@@ -1058,7 +1200,7 @@ export function installWebBridge(): void {
         }
       } catch {
         if (!win.closed) win.close()
-        return { ok: false, baseUrl, connected: false }
+        return { ok: false, baseUrl, connected: false, error: 'oauth_begin_failed' }
       }
     },
     // Disconnect: clear stored oauth tokens for the connection matching the
@@ -1208,6 +1350,7 @@ export function installWebBridge(): void {
         return ''
       }
     },
+    saveGatewayFile,
     saveImageFromUrl: async (url) => {
       try {
         // Web port: fetch the image and trigger a browser download. Returns

@@ -2109,6 +2109,61 @@ patchFile(
   `sessionId={selectedSessionId || activeSessionId || routedSessionId || ''}`,
 )
 
+// --- app/settings/connections-registry.tsx: sign-in failure copy --------------
+// The registry editor's "Sign in" affordance used to toast the same generic
+// "Sign-in incomplete" for every non-connected outcome, which is exactly what
+// an unsupported gateway looks like (the proxy answers 400
+// native_pkce_unavailable, the bridge closes the blank tab it opened for the
+// popup-blocker dance). Branch on the relay's machine code so an older
+// cookie-only gateway tells the user to add it with an access token instead.
+patchFile(
+  'app/settings/connections-registry.tsx',
+  '// The bridge (and behind it the proxy\'s oauth relay) reports a machine',
+  `      const result = await window.hermesDesktop.oauthLoginConnectionConfig(editorUrl)
+
+      setOauthConnected(Boolean(result.connected))
+
+      if (result.connected) {
+        notify({
+          title: t.settings.gateway.signedIn,
+          message: t.settings.gateway.connectedTo(authProviderShape.providerLabel)
+        })
+      } else {
+        notify({
+          kind: 'warning',
+          title: t.boot.failure.signInIncompleteTitle,
+          message: t.boot.failure.signInIncompleteMessage
+        })
+      }`,
+  `      const result = await window.hermesDesktop.oauthLoginConnectionConfig(editorUrl)
+
+      // The bridge (and behind it the proxy's oauth relay) reports a machine
+      // code; older gateways that only advertise cookie auth answer
+      // 'native_pkce_unavailable' and deserve their own guidance.
+      const failure = 'error' in result && typeof result.error === 'string' ? result.error : undefined
+
+      setOauthConnected(Boolean(result.connected))
+
+      if (result.connected) {
+        notify({
+          title: t.settings.gateway.signedIn,
+          message: t.settings.gateway.connectedTo(authProviderShape.providerLabel)
+        })
+      } else if (failure === 'native_pkce_unavailable') {
+        notify({
+          kind: 'warning',
+          title: t.settings.gateway.browserSignInUnavailableTitle,
+          message: t.settings.gateway.browserSignInUnavailableMessage
+        })
+      } else {
+        notify({
+          kind: 'warning',
+          title: t.boot.failure.signInIncompleteTitle,
+          message: failure || t.boot.failure.signInIncompleteMessage
+        })
+      }`,
+)
+
 if (touched === 0) {
   console.log('no patches applied (all present)')
 } else {

@@ -337,6 +337,11 @@ export function ConnectionsRegistrySection() {
     try {
       const result = await window.hermesDesktop.oauthLoginConnectionConfig(editorUrl)
 
+      // The bridge (and behind it the proxy's oauth relay) reports a machine
+      // code; older gateways that only advertise cookie auth answer
+      // 'native_pkce_unavailable' and deserve their own guidance.
+      const failure = 'error' in result && typeof result.error === 'string' ? result.error : undefined
+
       setOauthConnected(Boolean(result.connected))
 
       if (result.connected) {
@@ -344,11 +349,17 @@ export function ConnectionsRegistrySection() {
           title: t.settings.gateway.signedIn,
           message: t.settings.gateway.connectedTo(authProviderShape.providerLabel)
         })
+      } else if (failure === 'native_pkce_unavailable') {
+        notify({
+          kind: 'warning',
+          title: t.settings.gateway.browserSignInUnavailableTitle,
+          message: t.settings.gateway.browserSignInUnavailableMessage
+        })
       } else {
         notify({
           kind: 'warning',
           title: t.boot.failure.signInIncompleteTitle,
-          message: t.boot.failure.signInIncompleteMessage
+          message: failure || t.boot.failure.signInIncompleteMessage
         })
       }
     } catch (err) {
